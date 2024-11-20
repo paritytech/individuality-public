@@ -714,10 +714,8 @@ pub mod pallet {
 		}
 
 		#[cfg(feature = "runtime-benchmarks")]
-		fn try_successful_origin(_context: &Context) -> Result<OriginFor<T>, ()> {
-			// Ok(Origin::PersonalAlias(ContextualAlias { alias: [0; 32], context: *context
-			// }).into())
-			todo!("alias [0; 32] with given context");
+		fn try_successful_origin(context: &Context) -> Result<OriginFor<T>, ()> {
+			Ok(Origin::PersonalAlias(ContextualAlias { alias: [0; 32], context: *context }).into())
 		}
 	}
 }
