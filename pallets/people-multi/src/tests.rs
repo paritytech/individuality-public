@@ -40,6 +40,7 @@ fn generate_people_with_index(
 #[test]
 fn build_ring_works() {
 	TestExt::new().execute_with(|| {
+		PeoplePallet::set_onboarding_size(RuntimeOrigin::root(), 5).unwrap();
 		// No one to onboard.
 		assert_noop!(
 			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO),

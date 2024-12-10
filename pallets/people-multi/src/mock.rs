@@ -69,7 +69,6 @@ impl crate::Config for Test {
 	type AccountContexts = ();
 	type ChunkPageSize = ConstU32<4096>;
 	type MaxRingSize = ConstU32<10>;
-	type OnboardingSize = ConstU32<5>;
 }
 
 #[allow(dead_code)]

@@ -111,10 +111,6 @@ pub mod pallet {
 		/// Maximum number of people included in a ring before a new one is created.
 		#[pallet::constant]
 		type MaxRingSize: Get<u32>;
-
-		/// Maximum number of people queued before onboarding to a ring.
-		#[pallet::constant]
-		type OnboardingSize: Get<u32>;
 	}
 
 	/// The current individuals we recognise.
@@ -124,6 +120,12 @@ pub mod pallet {
 	/// Keeps track of the ring index currently being populated.
 	#[pallet::storage]
 	pub type CurrentRingIndex<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+	/// Maximum number of people queued before onboarding to a ring.
+	///
+	/// TODO: To be moved to config for the production version.
+	#[pallet::storage]
+	pub type OnboardingSize<T: Config> = StorageValue<_, u32, ValueQuery>;
 
 	/// These are the keys that will be placed into each ring index.
 	#[pallet::storage]
@@ -240,12 +242,11 @@ pub mod pallet {
 				"chunk page size must hold at least one element"
 			);
 			assert!(<T as Config>::MaxRingSize::get() > 0, "rings must hold at least one person");
+			// Uncomment when `OnboardingSize` becomes a config value again.
+			// assert!(OnboardingSize::<T>::get() > 0, "onboarding size must be more than one
+			// person");
 			assert!(
-				<T as Config>::OnboardingSize::get() > 0,
-				"onboarding size must be more than one person"
-			);
-			assert!(
-				<T as Config>::OnboardingSize::get() <= <T as Config>::MaxRingSize::get(),
+				OnboardingSize::<T>::get() <= <T as Config>::MaxRingSize::get(),
 				"onboarding size must less than or equal to max ring size"
 			);
 		}
@@ -311,8 +312,8 @@ pub mod pallet {
 
 			// Here we check we have enough items in the queue, and that we can support another
 			// queue. TODO: Make this number configurable on how many we update at a time.
-			let queue_full = not_included_count >= T::OnboardingSize::get() &&
-				(T::MaxRingSize::get() - keys_len) >= T::OnboardingSize::get();
+			let queue_full = not_included_count >= OnboardingSize::<T>::get() &&
+				(T::MaxRingSize::get() - keys_len) >= OnboardingSize::<T>::get();
 
 			let should_build = keys.keys.is_full() || queue_full;
 			ensure!(should_build, Error::<T>::Incomplete);
@@ -478,6 +479,17 @@ pub mod pallet {
 			let _: Vec<_> = AliasToAccount::<T>::drain().collect();
 			let _: Vec<_> = AccountToAlias::<T>::drain().collect();
 
+			Ok(Pays::No.into())
+		}
+
+		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(50)]
+		pub fn set_onboarding_size(
+			origin: OriginFor<T>,
+			onboarding_size: u32,
+		) -> DispatchResultWithPostInfo {
+			ensure_root(origin)?;
+			OnboardingSize::<T>::put(onboarding_size);
 			Ok(Pays::No.into())
 		}
 	}
