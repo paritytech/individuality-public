@@ -29,6 +29,7 @@ use individuality_support::{
 	utils::{prepare_nonce_for_account, validate_nonce_for_account, ValidNonceInfo},
 };
 use scale_info::TypeInfo;
+use sp_core::twox_64;
 use sp_runtime::{
 	traits::{DispatchInfoOf, PostDispatchInfoOf, TransactionExtension, ValidateResult},
 	transaction_validity::{InvalidTransaction, TransactionValidityError, ValidTransaction},
@@ -143,8 +144,13 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 				let local_origin = Origin::PersonalAlias(ca);
 				let mut origin = origin;
 				origin.set_caller_from(local_origin);
+				// TODO: GUI: consider having some good provides and nonce.
 
-				Ok((ValidTransaction::default(), Val::UsingAliasWithProof, origin))
+				let provides = twox_64(&(proof, ring, context, inherited_implication).encode()[..]);
+				let valid_transaction =
+					ValidTransaction::with_tag_prefix("Ppl:Alias").and_provides(provides).into();
+
+				Ok((valid_transaction, Val::UsingAliasWithProof, origin))
 			},
 			Some(AsPersonInfo::AsPersonalIdentityWithProof(signature, index)) => {
 				ensure!(
@@ -165,8 +171,12 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 				let local_origin = Origin::PersonalIdentity(*index);
 				let mut origin = origin;
 				origin.set_caller_from(local_origin);
+				// TODO: GUI: consider having some good provides and nonce.
+				let provides = twox_64(&(signature, index, inherited_implication).encode()[..]);
+				let valid_transaction =
+					ValidTransaction::with_tag_prefix("Ppl:Id").and_provides(provides).into();
 
-				Ok((ValidTransaction::default(), Val::UsingIdentityWithProof, origin))
+				Ok((valid_transaction, Val::UsingIdentityWithProof, origin))
 			},
 			None => Ok((ValidTransaction::default(), Val::NotUsing, origin)),
 		}
