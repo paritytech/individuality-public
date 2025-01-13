@@ -181,6 +181,15 @@ pub mod pallet {
 		OptionQuery,
 	>;
 
+	/// The next free and never reserved personal ID.
+	#[pallet::storage]
+	pub type NextPersonalId<T> = StorageValue<_, PersonalId, ValueQuery>;
+
+	/// Candidates' reserved identities which we track.
+	#[pallet::storage]
+	pub type ReservedPersonalId<T: Config> =
+		StorageMap<_, Twox64Concat, PersonalId, (), OptionQuery>;
+
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
@@ -222,6 +231,12 @@ pub mod pallet {
 		CouldNotPush,
 		/// The record is already using this key.
 		SameKey,
+		/// Personal Id was not reserved.
+		PersonalIdNotReserved,
+		/// Personal Id has never been reserved.
+		PersonalIdReservationCannotRenew,
+		/// Personal Id was not reserved or not already recognized.
+		PersonalIdNotReservedOrNotRecognized,
 	}
 
 	#[pallet::origin]
@@ -483,6 +498,20 @@ pub mod pallet {
 		}
 
 		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(7)]
+		pub fn force_recognize_personhood(
+			origin: OriginFor<T>,
+			people: Vec<MemberOf<T>>,
+		) -> DispatchResultWithPostInfo {
+			ensure_root(origin)?;
+			for key in people {
+				let personal_id = Self::reserve_new_id();
+				Self::recognize_personhood(personal_id, Some(key))?;
+			}
+			Ok(().into())
+		}
+
+		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(50)]
 		pub fn set_onboarding_size(
 			origin: OriginFor<T>,
@@ -602,14 +631,51 @@ pub mod pallet {
 
 	impl<T: Config> AddOnlyPeopleTrait for Pallet<T> {
 		type Member = MemberOf<T>;
+
 		type Signature = SignatureOf<T>;
+
+		fn reserve_new_id() -> PersonalId {
+			let new_id = NextPersonalId::<T>::mutate(|id| {
+				let new_id = *id;
+				id.saturating_inc();
+				new_id
+			});
+			ReservedPersonalId::<T>::insert(new_id, ());
+			new_id
+		}
+
+		fn cancel_id_reservation(personal_id: PersonalId) -> Result<(), DispatchError> {
+			ReservedPersonalId::<T>::take(personal_id).ok_or(Error::<T>::PersonalIdNotReserved)?;
+			Ok(())
+		}
+
+		fn renew_id_reservation(personal_id: PersonalId) -> Result<(), DispatchError> {
+			if NextPersonalId::<T>::get() <= personal_id ||
+				People::<T>::contains_key(personal_id) ||
+				ReservedPersonalId::<T>::contains_key(personal_id)
+			{
+				return Err(Error::<T>::PersonalIdReservationCannotRenew.into());
+			}
+			ReservedPersonalId::<T>::insert(personal_id, ());
+			Ok(())
+		}
+
 		fn recognize_personhood(
 			who: PersonalId,
 			maybe_key: Option<MemberOf<T>>,
 		) -> Result<(), DispatchError> {
+			ensure!(
+				ReservedPersonalId::<T>::contains_key(who) || People::<T>::contains_key(who),
+				Error::<T>::PersonalIdNotReservedOrNotRecognized
+			);
+
 			// If no key is being provided, then bail now.
 			let Some(key) = maybe_key else { return Err(Error::<T>::NoKey.into()) };
-			Self::do_insert_key(who, key)
+			Self::do_insert_key(who, key)?;
+
+			ReservedPersonalId::<T>::remove(who);
+
+			Ok(())
 		}
 
 		fn verify_signature(signer: PersonalId, msg: &[u8], signature: &Self::Signature) -> bool {

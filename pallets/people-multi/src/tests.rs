@@ -26,7 +26,7 @@ fn generate_people_with_index(
 ) -> Vec<(PersonalId, MemberOf<Test>, SecretOf<Test>)> {
 	let mut people = Vec::new();
 	for i in start..=end {
-		let person = i as u64;
+		let person = PeoplePallet::reserve_new_id();
 		let secret = Simple::new_secret([i; 32]);
 		let public = Simple::member_from_secret(&secret);
 
@@ -404,13 +404,13 @@ fn build_ring_works() {
 fn recognize_person_with_duplicate_key() {
 	TestExt::new().execute_with(|| {
 		// Recognize person A with a key.
-		let person_a = 1u64;
+		let person_a = PeoplePallet::reserve_new_id();
 		let secret_a = Simple::new_secret([1; 32]);
 		let key_a = Simple::member_from_secret(&secret_a);
 		PeoplePallet::recognize_personhood(person_a, Some(key_a)).unwrap();
 
 		// Recognize person B with the same key.
-		let person_b = 2u64;
+		let person_b = PeoplePallet::reserve_new_id();
 		assert_noop!(
 			PeoplePallet::recognize_personhood(person_b, Some(key_a)),
 			Error::<Test>::KeyAlreadyInUse
@@ -444,15 +444,22 @@ fn recognize_person_with_duplicate_key() {
 #[test]
 fn recognize_same_person_2_times() {
 	TestExt::new().execute_with(|| {
-		let person_a = 1u64;
+		let person_a = PeoplePallet::reserve_new_id();
 		let secret_a = Simple::new_secret([1; 32]);
+		let secret_b = Simple::new_secret([2; 32]);
 		let key_a = Simple::member_from_secret(&secret_a);
+		let key_b = Simple::member_from_secret(&secret_b);
 		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_a)));
 		assert!(People::<Test>::get(person_a).is_some());
 		assert_noop!(
 			PeoplePallet::recognize_personhood(person_a, Some(key_a)),
-			Error::<Test>::KeyAlreadyInUse
+			Error::<Test>::KeyAlreadyInUse,
 		);
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(person_a),
+			Error::<Test>::PersonalIdReservationCannotRenew,
+		);
+		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_b)));
 	});
 }
 
@@ -479,3 +486,174 @@ fn recognize_same_person_2_times() {
 // 		);
 // 	});
 // }
+
+#[test]
+fn id_reservation_works() {
+	TestExt::new().execute_with(|| {
+		// Initially, no personal IDs are reserved or recognized.
+		assert_eq!(NextPersonalId::<Test>::get(), 0);
+		assert!(!ReservedPersonalId::<Test>::contains_key(0));
+		assert!(People::<Test>::get(0).is_none());
+
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(0),
+			Error::<Test>::PersonalIdReservationCannotRenew,
+		);
+
+		// Reserve a new ID. This should create a reservation at ID=0.
+		assert_eq!(PeoplePallet::reserve_new_id(), 0);
+		assert_eq!(NextPersonalId::<Test>::get(), 1);
+		assert!(ReservedPersonalId::<Test>::contains_key(0));
+		assert!(People::<Test>::get(0).is_none());
+
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(0),
+			Error::<Test>::PersonalIdReservationCannotRenew,
+		);
+
+		// Reserve another new ID. This should create a reservation at ID=1.
+		assert_eq!(PeoplePallet::reserve_new_id(), 1);
+		assert_eq!(NextPersonalId::<Test>::get(), 2);
+		assert!(ReservedPersonalId::<Test>::contains_key(1));
+		assert!(People::<Test>::get(1).is_none());
+
+		// Cancel the reservation for ID=0.
+		assert_ok!(PeoplePallet::cancel_id_reservation(0));
+		assert!(!ReservedPersonalId::<Test>::contains_key(0));
+		assert!(People::<Test>::get(0).is_none());
+
+		// Reserve a new ID again. This should create a reservation at ID=2.
+		assert_eq!(PeoplePallet::reserve_new_id(), 2);
+		assert_eq!(NextPersonalId::<Test>::get(), 3);
+		assert!(ReservedPersonalId::<Test>::contains_key(2));
+		assert!(People::<Test>::get(2).is_none());
+
+		// Renew the reservation for ID=0.
+		assert_ok!(PeoplePallet::renew_id_reservation(0));
+		assert!(ReservedPersonalId::<Test>::contains_key(0));
+		assert!(People::<Test>::get(0).is_none());
+
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(0),
+			Error::<Test>::PersonalIdReservationCannotRenew,
+		);
+
+		// Recognize personhood for ID=0 with a dummy key.
+		assert_ok!(PeoplePallet::recognize_personhood(0, Some([0; 32])));
+		assert!(People::<Test>::get(0).is_some());
+		assert!(!ReservedPersonalId::<Test>::contains_key(0));
+
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(0),
+			Error::<Test>::PersonalIdReservationCannotRenew,
+		);
+	});
+}
+
+#[test]
+fn force_recognize_personhood_works() {
+	TestExt::new().execute_with(|| {
+		use verifiable::demo_impls::Simple;
+
+		// We'll create 5 new people to recognize.
+		let num_people = 5;
+		let mut keys = Vec::new();
+		for i in 0..num_people {
+			let secret = Simple::new_secret([i as u8; 32]);
+			let public_key = Simple::member_from_secret(&secret);
+			keys.push(public_key);
+		}
+
+		// Initially, no one is recognized.
+		for id in 0..num_people {
+			assert!(People::<Test>::get(id).is_none());
+			assert!(!ReservedPersonalId::<Test>::contains_key(id));
+		}
+		assert_eq!(NextPersonalId::<Test>::get(), 0);
+
+		// Using the root origin, force recognize these people.
+		assert_ok!(PeoplePallet::force_recognize_personhood(RuntimeOrigin::root(), keys.clone()));
+
+		// After recognition, each person should now exist in storage.
+		for (i, key) in keys.clone().into_iter().enumerate() {
+			let who = i as PersonalId;
+			let record = People::<Test>::get(who).expect("Person should be recognized");
+			assert_eq!(record.key, key);
+			assert!(!ReservedPersonalId::<Test>::contains_key(who));
+		}
+
+		// NextPersonalId should now point to the next free ID after recognizing `num_people`.
+		assert_eq!(NextPersonalId::<Test>::get(), num_people);
+
+		// Any further IDs not used yet should be empty.
+		assert!(People::<Test>::get(num_people).is_none());
+
+		// Fails for non-root origin.
+		assert_noop!(
+			PeoplePallet::force_recognize_personhood(RuntimeOrigin::signed(0), keys.clone()),
+			sp_runtime::DispatchError::BadOrigin
+		);
+
+		// Fails for duplicate keys.
+		let another_key = {
+			let secret = Simple::new_secret([233; 32]);
+			Simple::member_from_secret(&secret)
+		};
+		assert_noop!(
+			PeoplePallet::force_recognize_personhood(
+				RuntimeOrigin::root(),
+				vec![another_key, another_key]
+			),
+			Error::<Test>::KeyAlreadyInUse
+		);
+	});
+}
+
+#[test]
+fn cannot_renew_future_id() {
+	TestExt::new().execute_with(|| {
+		// Initially, NextPersonalId should be 0.
+		assert_eq!(NextPersonalId::<Test>::get(), 0);
+
+		// Id 0 is not reserved, can't renew.
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(0),
+			Error::<Test>::PersonalIdReservationCannotRenew
+		);
+
+		// Id 1 is not reserved, can't renew.
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(1),
+			Error::<Test>::PersonalIdReservationCannotRenew
+		);
+
+		// Reserve a new personal ID. This will be ID 0, and NextPersonalId should now become 1.
+		let first_id = PeoplePallet::reserve_new_id();
+		assert_eq!(first_id, 0);
+		assert_eq!(NextPersonalId::<Test>::get(), 1);
+
+		// Id 0 is reserved, can't renew.
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(0),
+			Error::<Test>::PersonalIdReservationCannotRenew
+		);
+
+		// Id 1 is future, can't renew.
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(1),
+			Error::<Test>::PersonalIdReservationCannotRenew
+		);
+
+		// Cancel the reservation for ID=0.
+		assert_ok!(PeoplePallet::cancel_id_reservation(0));
+
+		// Id 0 is not reserved, can renew.
+		assert_ok!(PeoplePallet::renew_id_reservation(0));
+
+		// Id 1 is future, can't renew.
+		assert_noop!(
+			PeoplePallet::renew_id_reservation(1),
+			Error::<Test>::PersonalIdReservationCannotRenew
+		);
+	});
+}
