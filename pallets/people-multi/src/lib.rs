@@ -679,7 +679,7 @@ pub mod pallet {
 		}
 
 		fn verify_signature(signer: PersonalId, msg: &[u8], signature: &Self::Signature) -> bool {
-			People::<T>::get(signer).map_or(false, |record| {
+			People::<T>::get(signer).is_some_and(|record| {
 				<<T as Config>::Crypto as GenerateVerifiable>::verify_signature(
 					signature,
 					msg,
