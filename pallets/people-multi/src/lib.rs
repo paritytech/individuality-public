@@ -64,6 +64,7 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{pallet_prelude::*, traits::Contains};
 	use frame_system::pallet_prelude::{BlockNumberFor, *};
+	use individuality_support::traits::CountedMembers;
 	use sp_arithmetic::traits::Saturating;
 
 	#[pallet::pallet]
@@ -754,6 +755,12 @@ pub mod pallet {
 		{}
 	}
 
+	impl<T: Config> CountedMembers for EnsurePersonalIdentity<T> {
+		fn active_count() -> u32 {
+			Keys::<T>::count()
+		}
+	}
+
 	/// Guard to ensure that the given origin is a person. The contextual alias of the person is
 	/// provided on success.
 	pub struct EnsurePersonalAlias<T>(PhantomData<T>);
@@ -778,6 +785,12 @@ pub mod pallet {
 		{}
 	}
 
+	impl<T: Config> CountedMembers for EnsurePersonalAlias<T> {
+		fn active_count() -> u32 {
+			Keys::<T>::count()
+		}
+	}
+
 	/// Guard to ensure that the given origin is a person. The alias of the person within the
 	/// context provided as an argument is returned on success.
 	pub struct EnsurePersonalAliasInContext<T>(PhantomData<T>);
@@ -794,6 +807,12 @@ pub mod pallet {
 		#[cfg(feature = "runtime-benchmarks")]
 		fn try_successful_origin(context: &Context) -> Result<OriginFor<T>, ()> {
 			Ok(Origin::PersonalAlias(ContextualAlias { alias: [0; 32], context: *context }).into())
+		}
+	}
+
+	impl<T: Config> CountedMembers for EnsurePersonalAliasInContext<T> {
+		fn active_count() -> u32 {
+			Keys::<T>::count()
 		}
 	}
 }
