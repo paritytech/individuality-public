@@ -474,15 +474,13 @@ pub mod pallet {
 
 		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(5)]
-		pub fn unset_alias_account(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
-			let account = ensure_signed(origin)?;
-			let alias = AccountToAlias::<T>::take(&account).ok_or(Error::<T>::InvalidAccount)?;
-
-			AliasToAccount::<T>::remove(alias);
+		pub fn unset_alias_account(origin: OriginFor<T>) -> DispatchResult {
+			let alias = Self::ensure_personal_alias(origin)?;
+			let account = AliasToAccount::<T>::take(&alias).ok_or(Error::<T>::InvalidAccount)?;
+			AccountToAlias::<T>::remove(&account);
 			frame_system::Pallet::<T>::dec_sufficients(&account);
 
-			// TODO: This is how we handle tasks for now.
-			Ok(Pays::No.into())
+			Ok(())
 		}
 
 		#[pallet::weight(Weight::zero())]
