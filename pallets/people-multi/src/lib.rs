@@ -107,6 +107,10 @@ pub mod extension;
 pub mod types;
 pub mod weights;
 
+pub use pallet::*;
+pub use types::*;
+pub use weights::WeightInfo;
+
 use codec::{Decode, Encode, MaxEncodedLen};
 use core::cmp::{self};
 use frame_support::{
@@ -116,6 +120,7 @@ use frame_support::{
 	},
 	traits::{EnsureOriginWithArg, IsSubType, OriginTrait},
 };
+use frame_system::offchain::{CreateInherent, SubmitTransaction};
 use individuality_support::traits::{
 	AddOnlyPeopleTrait, Context, ContextualAlias, PersonalId, RingIndex,
 };
@@ -126,42 +131,41 @@ use sp_runtime::{
 };
 use verifiable::{Alias, GenerateVerifiable};
 
-pub use pallet::*;
-pub use types::*;
-pub use weights::WeightInfo;
-
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
 	use frame_support::{pallet_prelude::*, traits::Contains};
 	use frame_system::pallet_prelude::{BlockNumberFor, *};
 	use individuality_support::traits::CountedMembers;
-	use sp_arithmetic::traits::Saturating;
+	use sp_arithmetic::traits::{SaturatedConversion, Saturating};
+
+	const LOG_TARGET: &str = "runtime::people";
 
 	#[pallet::pallet]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
 	pub trait Config:
-		frame_system::Config<
-		RuntimeOrigin: From<Origin>
-		                   + From<<Self::RuntimeOrigin as OriginTrait>::PalletsOrigin>
-		                   + OriginTrait<
-			PalletsOrigin: From<Origin>
-			                   + TryInto<
-				Origin,
-				Error = <Self::RuntimeOrigin as OriginTrait>::PalletsOrigin,
+		CreateInherent<Call<Self>>
+		+ frame_system::Config<
+			RuntimeOrigin: From<Origin>
+			                   + From<<Self::RuntimeOrigin as OriginTrait>::PalletsOrigin>
+			                   + OriginTrait<
+				PalletsOrigin: From<Origin>
+				                   + TryInto<
+					Origin,
+					Error = <Self::RuntimeOrigin as OriginTrait>::PalletsOrigin,
+				>,
 			>,
-		>,
-		RuntimeCall: Parameter
-		                 + GetDispatchInfo
-		                 + IsSubType<Call<Self>>
-		                 + Dispatchable<
-			RuntimeOrigin = Self::RuntimeOrigin,
-			Info = DispatchInfo,
-			PostInfo = PostDispatchInfo,
-		>,
-	>
+			RuntimeCall: Parameter
+			                 + GetDispatchInfo
+			                 + IsSubType<Call<Self>>
+			                 + Dispatchable<
+				RuntimeOrigin = Self::RuntimeOrigin,
+				Info = DispatchInfo,
+				PostInfo = PostDispatchInfo,
+			>,
+		>
 	{
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
@@ -183,6 +187,15 @@ pub mod pallet {
 		/// Maximum number of people included in a ring before a new one is created.
 		#[pallet::constant]
 		type MaxRingSize: Get<u32>;
+
+		/// Interval at which calls to build_ring will be accepted
+		/// e.g., if interval = 10, calls to bake rings will only succeed at blocks 0, 10, 20 etc.
+		#[pallet::constant]
+		type RingBakingInterval: Get<BlockNumberFor<Self>>;
+
+		/// Maximum time in blocks that a transaction to bake a ring may stay alive.
+		#[pallet::constant]
+		type MaxBakingDelay: Get<BlockNumberFor<Self>>;
 	}
 
 	/// The current individuals we recognise.
@@ -337,6 +350,56 @@ pub mod pallet {
 				"onboarding size must less than or equal to max ring size"
 			);
 		}
+
+		fn offchain_worker(block_number: BlockNumberFor<T>) {
+			// Only attempt ring baking every N blocks to reduce contention
+			if (block_number % T::RingBakingInterval::get()).saturated_into::<u32>() != 0 {
+				return;
+			}
+
+			// Scan backward from the current ring to find the first that needs baking
+			let current_ring = CurrentRingIndex::<T>::get();
+			for ring_index in (0..=current_ring).rev() {
+				if Self::should_build_ring(ring_index) {
+					let call = Call::build_ring { ring_index };
+
+					let xt = T::create_inherent(call.into());
+					let res = SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
+
+					match res {
+						Ok(_) =>
+							log::info!(target: LOG_TARGET, "offchain_worker - ring baking transaction submitted"),
+						Err(e) =>
+							log::error!(target: LOG_TARGET, "offchain_worker - failed to submit ring baking transaction: {:?}", e),
+					}
+				}
+			}
+		}
+	}
+
+	#[pallet::validate_unsigned]
+	impl<T: Config> ValidateUnsigned for Pallet<T> {
+		type Call = Call<T>;
+
+		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
+			match call {
+				Call::build_ring { ring_index } => {
+					// Make sure the ring requires baking
+					if !Self::should_build_ring(*ring_index) {
+						return InvalidTransaction::Stale.into();
+					}
+
+					let tx_longevity = T::MaxBakingDelay::get();
+
+					ValidTransaction::with_tag_prefix("PersonhoodRingBaking")
+						.and_provides(ring_index)
+						.longevity(tx_longevity.saturated_into())
+						.propagate(true)
+						.build()
+				},
+				_ => Err(TransactionValidityError::Invalid(InvalidTransaction::Call)),
+			}
+		}
 	}
 
 	#[pallet::genesis_config]
@@ -383,27 +446,16 @@ pub mod pallet {
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// Build a ring that is fully populated.
-		///
-		/// This is a task!!
+		/// Builds a fully populated ring.
 		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(100)]
-		pub fn build_ring(_origin: OriginFor<T>, ring_index: RingIndex) -> DispatchResult {
-			// Get the keys for this ring, and make sure that the ring is full before we build it.
+		pub fn build_ring(origin: OriginFor<T>, ring_index: RingIndex) -> DispatchResult {
+			ensure_none(origin)?;
+
+			ensure!(Self::should_build_ring(ring_index), Error::<T>::StillFresh);
+
 			let mut keys = RingKeys::<T>::get(ring_index);
 			let keys_len = keys.keys.len() as u32;
-			let not_included_count = keys_len.saturating_sub(keys.included);
-
-			// If everything is already included, nothing to do.
-			ensure!(!not_included_count.is_zero(), Error::<T>::StillFresh);
-
-			// Here we check we have enough items in the queue, and that we can support another
-			// queue. TODO: Make this number configurable on how many we update at a time.
-			let queue_full = not_included_count >= OnboardingSize::<T>::get() &&
-				(T::MaxRingSize::get() - keys_len) >= OnboardingSize::<T>::get();
-
-			let should_build = keys.keys.is_full() || queue_full;
-			ensure!(should_build, Error::<T>::Incomplete);
 
 			// Get the current ring, and check it should be rebuilt.
 			// Return the next revision.
@@ -459,7 +511,7 @@ pub mod pallet {
 		pub fn as_personal_identity(
 			origin: OriginFor<T>,
 			index: PersonalId,
-			call: Box<T::RuntimeCall>,
+			call: Box<<T as frame_system::Config>::RuntimeCall>,
 			signature: <T::Crypto as GenerateVerifiable>::Signature,
 		) -> DispatchResultWithPostInfo {
 			let _ = ensure_signed(origin.clone())?;
@@ -482,7 +534,7 @@ pub mod pallet {
 		pub fn as_personal_alias(
 			origin: OriginFor<T>,
 			context: Context,
-			call: Box<T::RuntimeCall>,
+			call: Box<<T as frame_system::Config>::RuntimeCall>,
 			proof: <T::Crypto as GenerateVerifiable>::Proof,
 			ring: RingIndex,
 		) -> DispatchResultWithPostInfo {
@@ -509,7 +561,7 @@ pub mod pallet {
 		#[pallet::call_index(3)]
 		pub fn under_alias(
 			origin: OriginFor<T>,
-			call: Box<T::RuntimeCall>,
+			call: Box<<T as frame_system::Config>::RuntimeCall>,
 		) -> DispatchResultWithPostInfo {
 			let account = ensure_signed(origin.clone())?;
 			let ca = AccountToAlias::<T>::get(&account).ok_or(Error::<T>::InvalidAccount)?;
@@ -594,10 +646,32 @@ pub mod pallet {
 	}
 
 	impl<T: Config> Pallet<T> {
+		/// Ensures conditions are met to build a ring.
+		fn should_build_ring(ring_index: RingIndex) -> bool {
+			if !RingKeys::<T>::contains_key(ring_index) {
+				return false
+			}
+
+			let keys = RingKeys::<T>::get(ring_index);
+			let keys_len = keys.keys.len() as u32;
+
+			let not_included_count = keys_len.saturating_sub(keys.included);
+			if not_included_count.is_zero() {
+				return false
+			}
+
+			// Here we check we have enough items in the queue, and that we can support another
+			// queue. TODO: Make this number configurable on how many we update at a time.
+			let queue_full = not_included_count >= OnboardingSize::<T>::get() &&
+				(T::MaxRingSize::get() - keys_len) >= OnboardingSize::<T>::get();
+
+			keys.keys.is_full() || queue_full
+		}
+
 		fn derivative_call(
 			mut origin: OriginFor<T>,
 			local_origin: Origin,
-			call: T::RuntimeCall,
+			call: <T as frame_system::Config>::RuntimeCall,
 		) -> DispatchResultWithPostInfo {
 			origin.set_caller_from(<T::RuntimeOrigin as OriginTrait>::PalletsOrigin::from(
 				local_origin,

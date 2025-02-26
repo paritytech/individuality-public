@@ -52,7 +52,7 @@ fn build_ring_works() {
 
 		assert_noop!(
 			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO),
-			Error::<Test>::Incomplete
+			Error::<Test>::StillFresh
 		);
 
 		// Now we have enough to build one.
@@ -74,7 +74,7 @@ fn build_ring_works() {
 
 		// Can't build 3, because then there are only 4 spots left which is less than onboarding
 		// size of 5
-		assert_noop!(PeoplePallet::build_ring(RuntimeOrigin::none(), 3), Error::<Test>::Incomplete);
+		assert_noop!(PeoplePallet::build_ring(RuntimeOrigin::none(), 3), Error::<Test>::StillFresh);
 	});
 }
 
@@ -656,4 +656,166 @@ fn cannot_renew_future_id() {
 			Error::<Test>::PersonalIdReservationCannotRenew
 		);
 	});
+}
+
+mod offchain_worker {
+	use super::*;
+	use frame_support::{pallet_prelude::Get, traits::OffchainWorker, BoundedVec};
+	use sp_core::offchain::{
+		testing::{TestOffchainExt, TestTransactionPoolExt},
+		OffchainDbExt, OffchainWorkerExt, TransactionPoolExt,
+	};
+
+	#[test]
+	fn submits_transaction_only_at_interval_ticks() {
+		let mut ext = new_test_ext();
+		let (offchain, _state) = TestOffchainExt::new();
+		let (pool, state) = TestTransactionPoolExt::new();
+		ext.register_extension(OffchainDbExt::new(offchain.clone()));
+		ext.register_extension(OffchainWorkerExt::new(offchain));
+		ext.register_extension(TransactionPoolExt::new(pool));
+
+		ext.execute_with(|| {
+			// Only one new member is required to build the ring
+			OnboardingSize::<Test>::set(1);
+
+			// 5 members already exist in the ring and none of them is included
+			let member_keys = (0..5)
+				.map(|i| Simple::member_from_secret(&Simple::new_secret([i as u8; 32])))
+				.collect::<Vec<_>>();
+			let keys: KeysForRing<Test> = KeysForRing {
+				keys: BoundedVec::try_from(member_keys).expect("failed to init members"),
+				included: 0,
+			};
+			RingKeys::insert(0, keys.clone());
+
+			// Offchain worker should not submit the transaction
+			// if the block numbers are in between the interval so
+			// starting from block number 1 to T::RingBakingInterval - 1
+			let interval: u64 = <Test as Config>::RingBakingInterval::get();
+			let mut block = 1;
+			while block < interval {
+				System::set_block_number(block);
+				PeoplePallet::offchain_worker(block);
+				assert_eq!(state.read().transactions.len(), 0);
+				block += 1;
+			}
+
+			// At T::RingBakingInterval the offchain worker should submit the transaction
+			System::set_block_number(block);
+			PeoplePallet::offchain_worker(block);
+			assert_eq!(state.read().transactions.len(), 1);
+
+			// and the transaction should be build_ring call
+			let transaction = state.write().transactions.pop().unwrap();
+			let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
+			let ring_index = match ex.function {
+				crate::mock::RuntimeCall::PeoplePallet(crate::Call::build_ring {
+					ring_index,
+					..
+				}) => ring_index,
+				e => panic!("Unexpected call: {:?}", e),
+			};
+			assert_eq!(ring_index, 0);
+		});
+	}
+
+	#[test]
+	fn no_transaction_submitted_if_ring_doesnt_exist() {
+		let mut ext = new_test_ext();
+		let (offchain, _state) = TestOffchainExt::new();
+		let (pool, state) = TestTransactionPoolExt::new();
+		ext.register_extension(OffchainDbExt::new(offchain.clone()));
+		ext.register_extension(OffchainWorkerExt::new(offchain));
+		ext.register_extension(TransactionPoolExt::new(pool));
+
+		ext.execute_with(|| {
+			let block = 0;
+			System::set_block_number(block);
+			PeoplePallet::offchain_worker(block);
+			assert_eq!(state.read().transactions.len(), 0);
+		});
+	}
+
+	#[test]
+	fn no_transaction_submitted_if_not_included_too_small() {
+		let mut ext = new_test_ext();
+		let (offchain, _state) = TestOffchainExt::new();
+		let (pool, state) = TestTransactionPoolExt::new();
+		ext.register_extension(OffchainDbExt::new(offchain.clone()));
+		ext.register_extension(OffchainWorkerExt::new(offchain));
+		ext.register_extension(TransactionPoolExt::new(pool));
+
+		ext.execute_with(|| {
+			// Only one new member is required to build the ring
+			OnboardingSize::<Test>::set(2);
+
+			// 1 member exists in the ring and is not included
+			let member_keys = vec![Simple::member_from_secret(&Simple::new_secret([0u8; 32]))];
+			let keys: KeysForRing<Test> = KeysForRing {
+				keys: BoundedVec::try_from(member_keys).expect("failed to init members"),
+				included: 0,
+			};
+			RingKeys::insert(0, keys.clone());
+
+			let block = 0;
+			System::set_block_number(block);
+			PeoplePallet::offchain_worker(block);
+			assert_eq!(state.read().transactions.len(), 0);
+		});
+	}
+}
+
+mod validate_unsigned {
+	use super::*;
+	use frame_support::BoundedVec;
+	use sp_runtime::{
+		traits::ValidateUnsigned,
+		transaction_validity::{InvalidTransaction, TransactionSource},
+	};
+
+	#[test]
+	fn only_works_for_build_ring_calls() {
+		TestExt::new().execute_with(|| {
+			// Set-up to make the checks validating the need of ring build pass
+			OnboardingSize::<Test>::set(1);
+			let member_key = Simple::member_from_secret(&Simple::new_secret([0u8; 32]));
+			let keys: KeysForRing<Test> = KeysForRing {
+				keys: BoundedVec::try_from(vec![member_key]).expect("failed to init members"),
+				included: 0,
+			};
+			RingKeys::insert(0, keys);
+
+			// build_ring call should succeed
+			let valid_call = Call::<Test>::build_ring { ring_index: 0 };
+			assert_ok!(PeoplePallet::validate_unsigned(TransactionSource::Local, &valid_call),);
+
+			// Other calls should fail
+			let force_recognize_call = Call::<Test>::force_recognize_personhood { people: vec![] };
+			assert_eq!(
+				PeoplePallet::validate_unsigned(TransactionSource::Local, &force_recognize_call),
+				InvalidTransaction::Call.into()
+			);
+
+			let set_onboarding_size_call = Call::<Test>::set_onboarding_size { onboarding_size: 1 };
+			assert_eq!(
+				PeoplePallet::validate_unsigned(
+					TransactionSource::Local,
+					&set_onboarding_size_call
+				),
+				InvalidTransaction::Call.into()
+			);
+		});
+	}
+
+	#[test]
+	fn checks_the_need_to_build_the_ring() {
+		TestExt::new().execute_with(|| {
+			let valid_call = Call::<Test>::build_ring { ring_index: 0 };
+			assert_eq!(
+				PeoplePallet::validate_unsigned(TransactionSource::Local, &valid_call),
+				InvalidTransaction::Stale.into()
+			);
+		});
+	}
 }

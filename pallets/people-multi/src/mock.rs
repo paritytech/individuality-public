@@ -16,8 +16,8 @@
 // limitations under the License.
 
 use crate::*;
-//use frame_support::{assert_ok, ensure, ord_parameter_types, parameter_types, traits::Hooks};
 use frame_support::derive_impl;
+use frame_system::offchain::CreateTransactionBase;
 use sp_core::{ConstU16, ConstU32, ConstU64, H256};
 use sp_runtime::{
 	traits::{BlakeTwo256, IdentityLookup},
@@ -62,6 +62,19 @@ impl frame_system::Config for Test {
 	type MaxConsumers = frame_support::traits::ConstU32<16>;
 }
 
+pub type Extrinsic = sp_runtime::testing::TestXt<RuntimeCall, ()>;
+
+impl CreateInherent<Call<Self>> for Test {
+	fn create_inherent(call: Self::RuntimeCall) -> Self::Extrinsic {
+		Extrinsic::new_bare(call)
+	}
+}
+
+impl CreateTransactionBase<Call<Self>> for Test {
+	type Extrinsic = Extrinsic;
+	type RuntimeCall = RuntimeCall;
+}
+
 impl crate::Config for Test {
 	type WeightInfo = ();
 	type RuntimeEvent = RuntimeEvent;
@@ -69,6 +82,8 @@ impl crate::Config for Test {
 	type AccountContexts = ();
 	type ChunkPageSize = ConstU32<4096>;
 	type MaxRingSize = ConstU32<10>;
+	type RingBakingInterval = ConstU64<10>;
+	type MaxBakingDelay = ConstU64<5>;
 }
 
 #[allow(dead_code)]
