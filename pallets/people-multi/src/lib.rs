@@ -231,7 +231,8 @@ pub mod pallet {
 	/// The current individuals we recognise: immutable ID of the individual into various
 	/// information about their status.
 	#[pallet::storage]
-	pub type People<T> = StorageMap<_, Blake2_128Concat, PersonalId, PersonRecord<MemberOf<T>>>;
+	pub type People<T: Config> =
+		StorageMap<_, Blake2_128Concat, PersonalId, PersonRecord<MemberOf<T>, T::AccountId>>;
 
 	/// Conversion of a contextual alias to an account ID.
 	#[pallet::storage]
@@ -250,6 +251,19 @@ pub mod pallet {
 		Blake2_128Concat,
 		<T as frame_system::Config>::AccountId,
 		ContextualAlias,
+		OptionQuery,
+	>;
+
+	/// Association of an account ID to a personal ID.
+	///
+	/// Managed with `set_personal_id_account` and `unset_personal_id_account`.
+	/// Reverse lookup is inside `People` storage, inside the record.
+	#[pallet::storage]
+	pub type AccountToPersonalId<T> = StorageMap<
+		_,
+		Blake2_128Concat,
+		<T as frame_system::Config>::AccountId,
+		PersonalId,
 		OptionQuery,
 	>;
 
@@ -282,6 +296,18 @@ pub mod pallet {
 		PersonhoodRecognized { who: PersonalId, key: MemberOf<T> },
 		/// An individual has had their personhood recognised and indexed.
 		PersonhoodResumed { who: PersonalId, key: MemberOf<T> },
+	}
+
+	#[pallet::extra_constants]
+	impl<T: Config> Pallet<T> {
+		/// The amount of block number tolerance we allow for a setup account transaction.
+		///
+		/// `set_alias_account` and `set_personal_id_account` calls contains
+		/// `call_valid_at` as a parameter, those calls are valid if the block number is within
+		/// the tolerance period.
+		pub fn account_setup_time_tolerance() -> BlockNumberFor<T> {
+			600u32.into()
+		}
 	}
 
 	#[pallet::error]
@@ -322,6 +348,8 @@ pub mod pallet {
 		PersonalIdReservationCannotRenew,
 		/// Personal Id was not reserved or not already recognized.
 		PersonalIdNotReservedOrNotRecognized,
+		/// Call is too late or too early.
+		TimeOutOfRange,
 	}
 
 	#[pallet::origin]
@@ -572,15 +600,31 @@ pub mod pallet {
 		}
 
 		/// This transaction is refunded if successful and no alias was previously set.
+		///
+		/// The call is valid from `call_valid_at` until
+		/// `call_valid_at + account_setup_time_tolerance`.
+		/// `account_setup_time_tolerance` is a constant available in the metadata.
+		///
+		/// Parameters:
+		/// - `account`: The account to set the alias for.
+		/// - `call_valid_at`: The block number when the call becomes valid.
 		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(4)]
 		pub fn set_alias_account(
 			origin: OriginFor<T>,
 			account: T::AccountId,
+			call_valid_at: BlockNumberFor<T>,
 		) -> DispatchResultWithPostInfo {
 			let ca = Self::ensure_personal_alias(origin)?;
+			let now = frame_system::Pallet::<T>::block_number();
+			let time_tolerance = Self::account_setup_time_tolerance();
+			ensure!(
+				call_valid_at <= now && now <= call_valid_at.saturating_add(time_tolerance),
+				Error::<T>::TimeOutOfRange
+			);
 			ensure!(T::AccountContexts::contains(&ca.context), Error::<T>::InvalidContext);
 			ensure!(!AccountToAlias::<T>::contains_key(&account), Error::<T>::AccountInUse);
+			ensure!(!AccountToPersonalId::<T>::contains_key(&account), Error::<T>::AccountInUse);
 			let pays = if let Some(old_account) = AliasToAccount::<T>::get(&ca) {
 				frame_system::Pallet::<T>::dec_sufficients(&old_account);
 				AccountToAlias::<T>::remove(&old_account);
@@ -631,6 +675,67 @@ pub mod pallet {
 				Self::recognize_personhood(personal_id, Some(key))?;
 			}
 			Ok(().into())
+		}
+
+		/// Set a personal id account.
+		///
+		/// The account can then be used to sign transactions on behalf of the personal id, and
+		/// provide replay protection with the nonce.
+		///
+		/// This transaction is refunded if successful and no account was previously set for the
+		/// personal id.
+		///
+		/// The call is valid from `call_valid_at` until
+		/// `call_valid_at + account_setup_time_tolerance`.
+		/// `account_setup_time_tolerance` is a constant available in the metadata.
+		///
+		/// Parameters:
+		/// - `account`: The account to set the alias for.
+		/// - `call_valid_at`: The block number when the call becomes valid.
+		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(8)]
+		pub fn set_personal_id_account(
+			origin: OriginFor<T>,
+			account: T::AccountId,
+			call_valid_at: BlockNumberFor<T>,
+		) -> DispatchResultWithPostInfo {
+			let id = Self::ensure_personal_identity(origin)?;
+			let now = frame_system::Pallet::<T>::block_number();
+			let time_tolerance = Self::account_setup_time_tolerance();
+			ensure!(
+				call_valid_at <= now && now <= call_valid_at.saturating_add(time_tolerance),
+				Error::<T>::TimeOutOfRange
+			);
+			ensure!(!AccountToPersonalId::<T>::contains_key(&account), Error::<T>::AccountInUse);
+			ensure!(!AccountToAlias::<T>::contains_key(&account), Error::<T>::AccountInUse);
+			let mut record = People::<T>::get(id).ok_or(Error::<T>::NotPerson)?;
+			let pays = if let Some(old_account) = record.account {
+				frame_system::Pallet::<T>::dec_sufficients(&old_account);
+				AccountToPersonalId::<T>::remove(&old_account);
+				Pays::Yes
+			} else {
+				Pays::No
+			};
+			record.account = Some(account.clone());
+			frame_system::Pallet::<T>::inc_sufficients(&account);
+			AccountToPersonalId::<T>::insert(&account, id);
+			People::<T>::insert(id, &record);
+
+			Ok(pays.into())
+		}
+
+		/// Unset the personal id account.
+		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(9)]
+		pub fn unset_personal_id_account(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
+			let id = Self::ensure_personal_identity(origin)?;
+			let mut record = People::<T>::get(id).ok_or(Error::<T>::NotPerson)?;
+			let account = record.account.take().ok_or(Error::<T>::InvalidAccount)?;
+			AccountToPersonalId::<T>::take(&account).ok_or(Error::<T>::InvalidAccount)?;
+			frame_system::Pallet::<T>::dec_sufficients(&account);
+			People::<T>::insert(id, &record);
+
+			Ok(Pays::Yes.into())
 		}
 
 		#[pallet::weight(Weight::zero())]
@@ -754,6 +859,7 @@ pub mod pallet {
 				key: key.clone(),
 				ring_index: current_ring_index,
 				key_index: keys_len,
+				account: None,
 			};
 			Self::deposit_event(Event::<T>::PersonhoodRecognized { who, key });
 			Keys::<T>::insert(&record.key, who);

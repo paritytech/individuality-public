@@ -15,9 +15,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{mock::*, *};
-use frame_support::{assert_noop, assert_ok};
+use crate::{
+	extension::{AsPerson, AsPersonInfo},
+	mock::*,
+	pallet::{AccountToPersonalId, Origin as PeopleOrigin},
+	*,
+};
+use frame_support::{assert_noop, assert_ok, pallet_prelude::Pays};
 use individuality_support::traits::RI_ZERO;
+use sp_runtime::transaction_validity::InvalidTransaction;
 use verifiable::demo_impls::Simple;
 
 fn generate_people_with_index(
@@ -655,6 +661,135 @@ fn cannot_renew_future_id() {
 			PeoplePallet::renew_id_reservation(1),
 			Error::<Test>::PersonalIdReservationCannotRenew
 		);
+	});
+}
+
+#[test]
+fn test_set_personal_id_account() {
+	TestExt::new().execute_with(|| {
+		generate_people_with_index(0, 3);
+
+		// (In our test, we treat PersonalId as a simple u64.)
+		// Verify that there are no mappings for personal id 1 and account 42.
+		assert!(AccountToPersonalId::<Test>::get(42).is_none());
+		assert!(People::<Test>::get(1).unwrap().account.is_none());
+
+		// Create an origin that represents a personal identity.
+		// (Recall that your pallet’s Origin enum has a variant PersonalIdentity.)
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(1));
+		// Call the extrinsic to set personal id account.
+		assert_ok!(PeoplePallet::set_personal_id_account(origin, 42, 0), Pays::No.into());
+
+		// Check that the mapping is now present.
+		assert_eq!(AccountToPersonalId::<Test>::get(42), Some(1));
+		assert_eq!(People::<Test>::get(1).unwrap().account, Some(42));
+
+		// Now update the mapping by calling the extrinsic again.
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(1));
+		// Here we change the account to 43.
+		assert_ok!(PeoplePallet::set_personal_id_account(origin, 43, 0), Pays::Yes.into());
+		// The old mapping for account 42 should be removed.
+		assert!(AccountToPersonalId::<Test>::get(42).is_none());
+		assert_eq!(AccountToPersonalId::<Test>::get(43), Some(1));
+		assert_eq!(People::<Test>::get(1).unwrap().account, Some(43));
+
+		// Test that a non-personal identity origin (for example, a Signed origin)
+		// does not work (the call should error with BadOrigin).
+		let origin = RuntimeOrigin::signed(44);
+		assert_noop!(
+			PeoplePallet::set_personal_id_account(origin, 44, 0),
+			sp_runtime::DispatchError::BadOrigin
+		);
+
+		// Test that trying to use an account that is already in use fails.
+		// First, set a mapping for personal id 2 using account 45.
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(2));
+		assert_ok!(PeoplePallet::set_personal_id_account(origin, 45, 0), Pays::No.into());
+		// Then try to set personal id 3 to use the same account 45.
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
+		assert_noop!(
+			PeoplePallet::set_personal_id_account(origin, 45, 0),
+			Error::<Test>::AccountInUse
+		);
+	});
+}
+
+#[test]
+fn test_unset_personal_id_account() {
+	TestExt::new().execute_with(|| {
+		generate_people_with_index(0, 1);
+
+		// First, set a mapping for personal id 1 to account 50.
+		let id_origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(1));
+		assert_ok!(
+			PeoplePallet::set_personal_id_account(id_origin.clone(), 50, 0),
+			Pays::No.into()
+		);
+		assert_eq!(AccountToPersonalId::<Test>::get(50), Some(1));
+
+		// Now call the unset extrinsic.
+		assert_ok!(PeoplePallet::unset_personal_id_account(id_origin.clone()), Pays::Yes.into());
+		// Verify that the mappings have been removed.
+		assert!(AccountToPersonalId::<Test>::get(50).is_none());
+		assert!(People::<Test>::get(1).unwrap().account.is_none());
+
+		// Calling unset again on the same account should fail.
+		assert_noop!(
+			PeoplePallet::unset_personal_id_account(id_origin.clone()),
+			Error::<Test>::InvalidAccount
+		);
+	});
+}
+
+#[test]
+fn test_as_personal_identity_with_account_check_and_nonce() {
+	// Use our test externalities.
+	new_test_ext().execute_with(|| {
+		let dummy_call = frame_system::Call::<Test>::remark { remark: vec![] };
+		let account: u64 = 42;
+
+		// 0: transaction fails because there signer is wrong, no associated personal id.
+		let nonce: u64 = 0;
+		let tx_ext = (
+			AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalIdentityWithAccount(nonce))),
+			frame_system::CheckNonce::<Test>::from(nonce),
+		);
+		assert_noop!(
+			exec_tx(Some(account), tx_ext, dummy_call.clone()),
+			InvalidTransaction::BadSigner
+		);
+
+		// Add a person and an associated account ---
+		let personal_id = generate_people_with_index(0, 0).pop().unwrap().0;
+		AccountToPersonalId::<Test>::insert(account, personal_id);
+		System::inc_sufficients(&account);
+
+		// 1: a successful transaction
+		let nonce: u64 = 0;
+		let tx_ext = (
+			AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalIdentityWithAccount(nonce))),
+			frame_system::CheckNonce::<Test>::from(nonce),
+		);
+		assert_ok!(exec_tx(Some(account), tx_ext, dummy_call.clone()));
+		assert_eq!(frame_system::Pallet::<Test>::account_nonce(account), 1);
+
+		// 2: another successful transaction
+		let nonce: u64 = 1;
+		let tx_ext = (
+			AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalIdentityWithAccount(nonce))),
+			frame_system::CheckNonce::<Test>::from(nonce),
+		);
+		assert_ok!(exec_tx(Some(account), tx_ext, dummy_call.clone()));
+		assert_eq!(frame_system::Pallet::<Test>::account_nonce(account), 2);
+
+		// 3: transaction fails because the nonce is wrong
+		let nonce: u64 = 1;
+		let tx_ext = (
+			AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalIdentityWithAccount(nonce))),
+			frame_system::CheckNonce::<Test>::from(nonce),
+		);
+		assert_noop!(exec_tx(Some(account), tx_ext, dummy_call), InvalidTransaction::Stale);
+		assert_eq!(frame_system::Pallet::<Test>::account_nonce(account), 2);
 	});
 }
 

@@ -57,11 +57,13 @@ pub struct KeysForRing<T: Config> {
 
 /// Record of personhood.
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-pub struct PersonRecord<Member> {
+pub struct PersonRecord<Member, AccountId> {
 	// The key used for the person.
 	pub key: Member,
 	// The ring they are assigned to.
 	pub ring_index: RingIndex,
 	/// The latest root revision that this key is push into.
 	pub key_index: u32,
+	/// An optional privileged account that can send transaction on the behalf of the person.
+	pub account: Option<AccountId>,
 }

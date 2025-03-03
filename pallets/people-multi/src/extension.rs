@@ -31,8 +31,9 @@ use individuality_support::{
 use scale_info::TypeInfo;
 use sp_core::twox_64;
 use sp_runtime::{
-	traits::{DispatchInfoOf, PostDispatchInfoOf, TransactionExtension, ValidateResult},
+	traits::{DispatchInfoOf, TransactionExtension, ValidateResult},
 	transaction_validity::{InvalidTransaction, TransactionValidityError, ValidTransaction},
+	Saturating,
 };
 
 /// Information required to transform an origin into a personal alias or personal identity.
@@ -41,10 +42,28 @@ use sp_runtime::{
 pub enum AsPersonInfo<T: Config + Send + Sync> {
 	/// The signed origin will be transformed using account to alias.
 	AsPersonalAliasWithAccount(T::Nonce),
-	/// The nonce origin will be transformed using proof.
+	/// The none origin will be transformed using proof.
+	///
+	/// This can only dispatch the call `set_alias_account`.
+	///
+	/// Replay is only protected against resetting the same account during the tolerance period
+	/// after `call_valid_at` parameter.
+	/// If 2 transaction that set 2 different account are sent for an overlapping validity period,
+	/// then those 2 transactions can be replayed indefinitely for the duration of the overlapping
+	/// period.
 	AsPersonalAliasWithProof(<T::Crypto as GenerateVerifiable>::Proof, RingIndex, Context),
-	/// The nonce origin will be transformed using signature.
+	/// The none origin will be transformed using signature.
+	///
+	/// This can only dispatch the call `set_personal_id_account`.
+	///
+	/// Replay is only protected against resetting the same account during the tolerance period
+	/// after `call_valid_at` parameter.
+	/// If 2 transaction that set 2 different account are sent for an overlapping validity period,
+	/// then those 2 transactions can be replayed indefinitely for the duration of the overlapping
+	/// period.
 	AsPersonalIdentityWithProof(<T::Crypto as GenerateVerifiable>::Signature, PersonalId),
+	/// The signed origin will be transformed using account to personal id.
+	AsPersonalIdentityWithAccount(T::Nonce),
 }
 
 /// Transaction extension to transform an origin into a personal alias or personal identity.
@@ -68,19 +87,13 @@ impl<T: Config + Send + Sync> AsPerson<T> {
 	pub fn new(explicit: Option<AsPersonInfo<T>>) -> Self {
 		Self(explicit)
 	}
-
-	fn weight() -> Weight {
-		// TODO: actual weight.
-		Weight::zero()
-	}
 }
 
 /// Info returned by validate to prepare in the [`AsPerson`] transactinon extension.
 pub enum Val<T: Config + Send + Sync> {
 	NotUsing,
-	UsingAliasWithAccount(T::AccountId, T::Nonce),
-	UsingAliasWithProof,
-	UsingIdentityWithProof,
+	UsingProof,
+	UsingAccount(T::AccountId, T::Nonce),
 }
 
 impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::RuntimeCall>
@@ -90,18 +103,22 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 	type Implicit = ();
 
 	type Val = Val<T>;
-
-	// Is using tx ext
-	type Pre = bool;
+	type Pre = ();
 
 	fn weight(&self, _call: &<T as frame_system::Config>::RuntimeCall) -> Weight {
-		Self::weight()
+		match self.0 {
+			None => Weight::zero(),
+			_ => {
+				// TODO: Gui weight for each variant.
+				Weight::zero()
+			},
+		}
 	}
 
 	fn validate(
 		&self,
 		origin: <T as frame_system::Config>::RuntimeOrigin,
-		_call: &<T as frame_system::Config>::RuntimeCall,
+		call: &<T as frame_system::Config>::RuntimeCall,
 		_info: &DispatchInfoOf<<T as frame_system::Config>::RuntimeCall>,
 		_len: usize,
 		_self_implicit: Self::Implicit,
@@ -124,13 +141,46 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 					validate_nonce_for_account::<T>(&who, *nonce)?;
 				let validity = ValidTransaction { requires, provides, ..Default::default() };
 
-				Ok((validity, Val::UsingAliasWithAccount(who, *nonce), origin))
+				Ok((validity, Val::UsingAccount(who, *nonce), origin))
+			},
+			Some(AsPersonInfo::AsPersonalIdentityWithAccount(nonce)) => {
+				let Some(frame_system::Origin::<T>::Signed(who)) = origin.as_system_ref() else {
+					return Err(InvalidTransaction::BadSigner.into());
+				};
+				let who = who.clone();
+
+				let id =
+					AccountToPersonalId::<T>::get(&who).ok_or(InvalidTransaction::BadSigner)?;
+				let local_origin = Origin::PersonalIdentity(id);
+				let mut origin = origin;
+				origin.set_caller_from(local_origin);
+
+				let ValidNonceInfo { requires, provides } =
+					validate_nonce_for_account::<T>(&who, *nonce)?;
+				let validity = ValidTransaction { requires, provides, ..Default::default() };
+
+				Ok((validity, Val::UsingAccount(who, *nonce), origin))
 			},
 			Some(AsPersonInfo::AsPersonalAliasWithProof(proof, ring, context)) => {
 				ensure!(
 					matches!(origin.as_system_ref(), Some(frame_system::RawOrigin::None)),
 					InvalidTransaction::BadSigner
 				);
+
+				let Some(Call::<T>::set_alias_account { account, call_valid_at }) =
+					call.is_sub_type()
+				else {
+					return Err(InvalidTransaction::Call.into());
+				};
+
+				let now = frame_system::Pallet::<T>::block_number();
+				if now < *call_valid_at {
+					return Err(InvalidTransaction::Future.into());
+				}
+				let time_tolerance = Pallet::<T>::account_setup_time_tolerance();
+				if now > call_valid_at.saturating_add(time_tolerance) {
+					return Err(InvalidTransaction::Stale.into());
+				}
 
 				let members =
 					Root::<T>::get(ring).map(|m| m.root).ok_or(InvalidTransaction::Call)?;
@@ -141,22 +191,46 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 					.map_err(|_| InvalidTransaction::BadProof)?;
 
 				let ca = ContextualAlias { alias, context: *context };
-				let local_origin = Origin::PersonalAlias(ca);
-				let mut origin = origin;
-				origin.set_caller_from(local_origin);
-				// TODO: GUI: consider having some good provides and nonce.
 
-				let provides = twox_64(&(proof, ring, context, inherited_implication).encode()[..]);
+				// This protects again replay attack.
+				if AliasToAccount::<T>::get(&ca)
+					.is_some_and(|stored_account| stored_account == *account)
+				{
+					return Err(InvalidTransaction::Stale.into());
+				}
+
+				// The extrinsic provides the setup of the account for the alias.
+				let provides = twox_64(&("setup", &ca, &account).encode()[..]);
 				let valid_transaction =
 					ValidTransaction::with_tag_prefix("Ppl:Alias").and_provides(provides).into();
 
-				Ok((valid_transaction, Val::UsingAliasWithProof, origin))
+				// We transmute the origin.
+				let local_origin = Origin::PersonalAlias(ca);
+				let mut origin = origin;
+				origin.set_caller_from(local_origin);
+
+				Ok((valid_transaction, Val::UsingProof, origin))
 			},
 			Some(AsPersonInfo::AsPersonalIdentityWithProof(signature, index)) => {
 				ensure!(
 					matches!(origin.as_system_ref(), Some(frame_system::RawOrigin::None)),
 					InvalidTransaction::BadSigner
 				);
+
+				let Some(Call::<T>::set_personal_id_account { account, call_valid_at }) =
+					call.is_sub_type()
+				else {
+					return Err(InvalidTransaction::Call.into());
+				};
+
+				let now = frame_system::Pallet::<T>::block_number();
+				if now < *call_valid_at {
+					return Err(InvalidTransaction::Future.into());
+				}
+				let time_tolerance = Pallet::<T>::account_setup_time_tolerance();
+				if now > call_valid_at.saturating_add(time_tolerance) {
+					return Err(InvalidTransaction::Stale.into());
+				}
 
 				let key = People::<T>::get(index)
 					.map(|record| record.key)
@@ -168,15 +242,24 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 					return Err(InvalidTransaction::BadProof.into());
 				}
 
-				let local_origin = Origin::PersonalIdentity(*index);
-				let mut origin = origin;
-				origin.set_caller_from(local_origin);
-				// TODO: GUI: consider having some good provides and nonce.
-				let provides = twox_64(&(signature, index, inherited_implication).encode()[..]);
+				// This protects again replay attack.
+				if People::<T>::get(index).is_some_and(|record| {
+					record.account.is_some_and(|stored_account| stored_account == *account)
+				}) {
+					return Err(InvalidTransaction::Stale.into());
+				}
+
+				// The extrinsic provides the setup of the account for the personal id.
+				let provides = twox_64(&("setup", index, &account).encode()[..]);
 				let valid_transaction =
 					ValidTransaction::with_tag_prefix("Ppl:Id").and_provides(provides).into();
 
-				Ok((valid_transaction, Val::UsingIdentityWithProof, origin))
+				// We transmute the origin.
+				let local_origin = Origin::PersonalIdentity(*index);
+				let mut origin = origin;
+				origin.set_caller_from(local_origin);
+
+				Ok((valid_transaction, Val::UsingProof, origin))
 			},
 			None => Ok((ValidTransaction::default(), Val::NotUsing, origin)),
 		}
@@ -191,29 +274,10 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 		_len: usize,
 	) -> Result<Self::Pre, TransactionValidityError> {
 		match val {
-			Val::NotUsing => Ok(false),
-			Val::UsingAliasWithAccount(who, nonce) => {
-				prepare_nonce_for_account::<T>(&who, nonce)?;
-				Ok(true)
-			},
-			Val::UsingAliasWithProof => Ok(true),
-			Val::UsingIdentityWithProof => Ok(true),
+			Val::UsingAccount(who, nonce) => prepare_nonce_for_account::<T>(&who, nonce)?,
+			Val::NotUsing | Val::UsingProof => (),
 		}
-	}
 
-	fn post_dispatch_details(
-		pre: Self::Pre,
-		_info: &DispatchInfoOf<<T as frame_system::Config>::RuntimeCall>,
-		_post_info: &PostDispatchInfoOf<<T as frame_system::Config>::RuntimeCall>,
-		_len: usize,
-		_result: &sp_runtime::DispatchResult,
-	) -> Result<Weight, TransactionValidityError> {
-		if pre {
-			// Is using tx ext
-			Ok(Weight::zero())
-		} else {
-			// Not using tx ext: some refund.
-			Ok(Self::weight())
-		}
+		Ok(())
 	}
 }

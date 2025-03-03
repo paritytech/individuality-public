@@ -16,15 +16,25 @@
 // limitations under the License.
 
 use crate::*;
-use frame_support::derive_impl;
-use frame_system::offchain::CreateTransactionBase;
+use frame_support::{derive_impl, dispatch::DispatchErrorWithPostInfo, storage::with_transaction};
+use frame_system::{offchain::CreateTransactionBase, ChainContext};
 use sp_core::{ConstU16, ConstU32, ConstU64, H256};
 use sp_runtime::{
-	traits::{BlakeTwo256, IdentityLookup},
-	BuildStorage,
+	testing::UintAuthorityId,
+	traits::{Applyable, BlakeTwo256, Checkable, IdentityLookup},
+	transaction_validity::{InvalidTransaction, TransactionSource, TransactionValidityError},
+	BuildStorage, DispatchError,
 };
 
-type Block = frame_system::mocking::MockBlock<Test>;
+pub type TransactionExtension = (crate::extension::AsPerson<Test>, frame_system::CheckNonce<Test>);
+pub type Header = sp_runtime::generic::Header<u64, sp_runtime::traits::BlakeTwo256>;
+pub type Block = sp_runtime::generic::Block<Header, UncheckedExtrinsic>;
+pub type UncheckedExtrinsic = sp_runtime::generic::UncheckedExtrinsic<
+	u64,
+	RuntimeCall,
+	sp_runtime::testing::UintAuthorityId,
+	TransactionExtension,
+>;
 
 // Configure a mock runtime to test the pallet.
 frame_support::construct_runtime!(
@@ -114,4 +124,64 @@ impl TestExt {
 pub fn new_test_ext() -> sp_io::TestExternalities {
 	let c = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 	sp_io::TestExternalities::from(c)
+}
+
+/// We gather both error into a single type in order to do `assert_ok` and `assert_err` safely.
+/// Otherwise, we can easily miss the inner error in a `Resut<Resut<_, _>, _>`.
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum TransactionExecutionError {
+	Validity(TransactionValidityError),
+	// This ignores the post info.
+	Dispatch(DispatchErrorWithPostInfo),
+}
+
+impl From<DispatchErrorWithPostInfo> for TransactionExecutionError {
+	fn from(e: DispatchErrorWithPostInfo) -> Self {
+		TransactionExecutionError::Dispatch(e)
+	}
+}
+
+impl From<TransactionValidityError> for TransactionExecutionError {
+	fn from(e: TransactionValidityError) -> Self {
+		TransactionExecutionError::Validity(e)
+	}
+}
+
+impl From<DispatchError> for TransactionExecutionError {
+	fn from(e: DispatchError) -> Self {
+		TransactionExecutionError::Dispatch(e.into())
+	}
+}
+
+impl From<InvalidTransaction> for TransactionExecutionError {
+	fn from(e: InvalidTransaction) -> Self {
+		TransactionExecutionError::Validity(e.into())
+	}
+}
+
+/// Execute a transaction with the given origin, call and transaction extension.
+pub fn exec_tx(
+	who: Option<u64>,
+	tx_ext: TransactionExtension,
+	call: impl Into<RuntimeCall>,
+) -> Result<(), TransactionExecutionError> {
+	let tx = match who {
+		Some(who) => UncheckedExtrinsic::new_signed(call.into(), who, UintAuthorityId(who), tx_ext),
+		None => UncheckedExtrinsic::new_transaction(call.into(), tx_ext),
+	};
+
+	let info = tx.get_dispatch_info();
+	let len = tx.encoded_size();
+
+	// Check and validate the extrinsic.
+	let checked = Checkable::check(tx, &ChainContext::<Test>::default())?;
+	with_transaction(|| {
+		let valid = checked.validate::<Test>(TransactionSource::External, &info, len);
+		sp_runtime::TransactionOutcome::Rollback(Result::<_, DispatchError>::Ok(valid))
+	})
+	.unwrap()?;
+	// Finally, apply the extrinsic.
+	checked.apply::<Test>(&info, len)??;
+
+	Ok(())
 }
