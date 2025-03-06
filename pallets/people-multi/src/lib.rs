@@ -175,7 +175,11 @@ pub mod pallet {
 
 		/// Trait allowing cryptographic proof of membership without exposing the underlying member.
 		/// Normally a Ring-VRF.
-		type Crypto: GenerateVerifiable<Proof: Send + Sync, Signature: Send + Sync>;
+		type Crypto: GenerateVerifiable<
+			Proof: Send + Sync + DecodeWithMemTracking,
+			Signature: Send + Sync + DecodeWithMemTracking,
+			Member: DecodeWithMemTracking,
+		>;
 
 		/// Contexts which may validly have an account alias behind it for everyone.
 		type AccountContexts: Contains<Context>;
@@ -353,7 +357,17 @@ pub mod pallet {
 	}
 
 	#[pallet::origin]
-	#[derive(Clone, PartialEq, Eq, RuntimeDebug, Encode, Decode, MaxEncodedLen, TypeInfo)]
+	#[derive(
+		Clone,
+		PartialEq,
+		Eq,
+		RuntimeDebug,
+		Encode,
+		Decode,
+		MaxEncodedLen,
+		TypeInfo,
+		DecodeWithMemTracking,
+	)]
 	pub enum Origin {
 		PersonalIdentity(PersonalId),
 		PersonalAlias(ContextualAlias),

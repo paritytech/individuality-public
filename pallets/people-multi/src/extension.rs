@@ -18,7 +18,7 @@
 //! People signed extensions.
 
 use crate::*;
-use codec::{Decode, Encode};
+use codec::{Decode, DecodeWithMemTracking, Encode};
 use core::fmt;
 use frame_support::{
 	ensure, pallet_prelude::TransactionSource, weights::Weight, CloneNoBound, DefaultNoBound,
@@ -37,7 +37,9 @@ use sp_runtime::{
 };
 
 /// Information required to transform an origin into a personal alias or personal identity.
-#[derive(Encode, Decode, TypeInfo, EqNoBound, CloneNoBound, PartialEqNoBound)]
+#[derive(
+	Encode, Decode, TypeInfo, EqNoBound, CloneNoBound, PartialEqNoBound, DecodeWithMemTracking,
+)]
 #[scale_info(skip_type_params(T))]
 pub enum AsPersonInfo<T: Config + Send + Sync> {
 	/// The signed origin will be transformed using account to alias.
@@ -67,7 +69,16 @@ pub enum AsPersonInfo<T: Config + Send + Sync> {
 }
 
 /// Transaction extension to transform an origin into a personal alias or personal identity.
-#[derive(Encode, Decode, TypeInfo, EqNoBound, CloneNoBound, PartialEqNoBound, DefaultNoBound)]
+#[derive(
+	Encode,
+	Decode,
+	TypeInfo,
+	EqNoBound,
+	CloneNoBound,
+	PartialEqNoBound,
+	DefaultNoBound,
+	DecodeWithMemTracking,
+)]
 #[scale_info(skip_type_params(T))]
 pub struct AsPerson<T: Config + Send + Sync>(Option<AsPersonInfo<T>>);
 
