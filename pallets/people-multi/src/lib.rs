@@ -1365,7 +1365,7 @@ pub mod pallet {
 			let mut last_index = None;
 			for i in suspended_indices.iter() {
 				// The suspended indices must be in ascending order.
-				if last_index.map_or(false, |last| last >= *i) {
+				if last_index.is_some_and(|last| last >= *i) {
 					return false;
 				}
 
