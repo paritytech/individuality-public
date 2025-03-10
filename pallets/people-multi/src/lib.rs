@@ -118,16 +118,16 @@ use frame_support::{
 		extract_actual_weight, DispatchInfo, DispatchResultWithPostInfo, GetDispatchInfo,
 		PostDispatchInfo,
 	},
-	traits::{EnsureOriginWithArg, IsSubType, OriginTrait},
+	traits::{Defensive, EnsureOriginWithArg, IsSubType, OriginTrait},
 };
 use frame_system::offchain::{CreateInherent, SubmitTransaction};
 use individuality_support::traits::{
-	AddOnlyPeopleTrait, Context, ContextualAlias, PersonalId, RingIndex,
+	AddOnlyPeopleTrait, Context, ContextualAlias, PeopleTrait, PersonalId, RingIndex,
 };
 use scale_info::TypeInfo;
 use sp_runtime::{
-	traits::{BadOrigin, Dispatchable, Zero},
-	ArithmeticError, RuntimeDebug,
+	traits::{BadOrigin, Dispatchable},
+	ArithmeticError, RuntimeDebug, SaturatedConversion, Saturating,
 };
 use verifiable::{Alias, GenerateVerifiable};
 
@@ -137,7 +137,6 @@ pub mod pallet {
 	use frame_support::{pallet_prelude::*, traits::Contains};
 	use frame_system::pallet_prelude::{BlockNumberFor, *};
 	use individuality_support::traits::CountedMembers;
-	use sp_arithmetic::traits::{SaturatedConversion, Saturating};
 
 	const LOG_TARGET: &str = "runtime::people";
 
@@ -192,14 +191,24 @@ pub mod pallet {
 		#[pallet::constant]
 		type MaxRingSize: Get<u32>;
 
+		/// Maximum number of people included in an onboarding queue page before a new one is
+		/// created.
+		#[pallet::constant]
+		type OnboardingQueuePageSize: Get<u32>;
+
 		/// Interval at which calls to build_ring will be accepted
 		/// e.g., if interval = 10, calls to bake rings will only succeed at blocks 0, 10, 20 etc.
 		#[pallet::constant]
 		type RingBakingInterval: Get<BlockNumberFor<Self>>;
 
-		/// Maximum time in blocks that a transaction to bake a ring may stay alive.
+		/// Interval at which the offchain worker will look to merge onboarding queue pages, in
+		/// blocks.
 		#[pallet::constant]
-		type MaxBakingDelay: Get<BlockNumberFor<Self>>;
+		type QueuePageMergingInterval: Get<BlockNumberFor<Self>>;
+
+		/// Maximum time in blocks that a task transaction to drive ring changes may stay alive.
+		#[pallet::constant]
+		type MaxTaskLifespan: Get<BlockNumberFor<Self>>;
 	}
 
 	/// The current individuals we recognise.
@@ -216,16 +225,36 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type OnboardingSize<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+	/// Hint for the maximum number of people that can be included in a ring through a single root
+	/// building call. If no value is set, then the onboarding size will be used instead.
+	#[pallet::storage]
+	pub type RingBuildingPeopleLimit<T: Config> = StorageValue<_, u32, OptionQuery>;
+
 	/// These are the keys that will be placed into each ring index.
 	#[pallet::storage]
-	pub type RingKeys<T: Config> =
-		StorageMap<_, Blake2_128Concat, RingIndex, KeysForRing<T>, ValueQuery>;
+	pub type RingKeys<T: Config> = StorageMap<
+		_,
+		Blake2_128Concat,
+		RingIndex,
+		BoundedVec<MemberOf<T>, T::MaxRingSize>,
+		ValueQuery,
+	>;
 
-	/// This is a duplicate of the (total keys, included keys) found in Ring Keys for Nova Team <3.
-	/// Not used in any pallet logic, but must be maintained and up to date.
+	/// Stores the meta information for each ring, the number of keys and how many are actually
+	/// included in the root.
 	#[pallet::storage]
-	pub type RingKeysMeta<T: Config> =
-		StorageMap<_, Blake2_128Concat, RingIndex, (u32, u32), ValueQuery>;
+	pub type RingKeysStatus<T: Config> =
+		StorageMap<_, Blake2_128Concat, RingIndex, RingStatus, ValueQuery>;
+
+	/// A map of all rings which currently have pending suspensions and need cleaning, along with
+	/// their respective number of suspended keys which need to be removed.
+	#[pallet::storage]
+	pub type PendingSuspensions<T: Config> =
+		StorageMap<_, Twox64Concat, RingIndex, u32, ValueQuery>;
+
+	/// The number of people currently included in a ring.
+	#[pallet::storage]
+	pub type ActiveMembers<T: Config> = StorageValue<_, u32, ValueQuery>;
 
 	/// The current individuals we recognise in a specific ring: lookup from the crypto (public) key
 	/// into the immutable ID of the individual.
@@ -233,7 +262,7 @@ pub mod pallet {
 	pub type Keys<T> = CountedStorageMap<_, Blake2_128Concat, MemberOf<T>, PersonalId>;
 
 	/// The current individuals we recognise: immutable ID of the individual into various
-	/// information about their status.
+	/// information about their key and status.
 	#[pallet::storage]
 	pub type People<T: Config> =
 		StorageMap<_, Blake2_128Concat, PersonalId, PersonRecord<MemberOf<T>, T::AccountId>>;
@@ -288,17 +317,38 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type NextPersonalId<T> = StorageValue<_, PersonalId, ValueQuery>;
 
+	/// A semaphore counter of ongoing mutation sessions. Whenever a DIM would want to suspend
+	/// people, it would first need to increment this counter and then start submitting the
+	/// suspended indices. After all indices are registered, the counter is decremented. Ring merges
+	/// are allowed only when no session is ongoing and the counter is 0.
+	#[pallet::storage]
+	pub type MutationSessionCounter<T> = StorageValue<_, u32, ValueQuery>;
+
 	/// Candidates' reserved identities which we track.
 	#[pallet::storage]
 	pub type ReservedPersonalId<T: Config> =
 		StorageMap<_, Twox64Concat, PersonalId, (), OptionQuery>;
+
+	/// Keeps track of the page indices of the head and tail of the onboarding queue.
+	#[pallet::storage]
+	pub type QueuePageIndices<T: Config> = StorageValue<_, (PageIndex, PageIndex), ValueQuery>;
+
+	/// Paginated collection of people public keys ready to be included in a ring.
+	#[pallet::storage]
+	pub type OnboardingQueue<T> = StorageMap<
+		_,
+		Twox64Concat,
+		PageIndex,
+		BoundedVec<MemberOf<T>, <T as Config>::OnboardingQueuePageSize>,
+		ValueQuery,
+	>;
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
 		/// An individual has had their personhood recognised and indexed.
 		PersonhoodRecognized { who: PersonalId, key: MemberOf<T> },
-		/// An individual has had their personhood recognised and indexed.
+		/// An individual has had their personhood recognised again and indexed.
 		PersonhoodResumed { who: PersonalId, key: MemberOf<T> },
 	}
 
@@ -352,8 +402,26 @@ pub mod pallet {
 		PersonalIdReservationCannotRenew,
 		/// Personal Id was not reserved or not already recognized.
 		PersonalIdNotReservedOrNotRecognized,
+		/// Ring cannot be merged if it's the top ring.
+		InvalidRing,
+		/// Ring cannot be built while there are suspensions pending.
+		SuspensionsPending,
+		/// There are no suspensions to be removed.
+		NoSuspensions,
+		/// Ring cannot be merged if it's not below 1/2 capacity.
+		RingAboveMergeThreshold,
+		/// Suspension indices provided are invalid.
+		InvalidSuspensions,
+		/// A suspension was queued when there was no mutation session in progress.
+		NoMutationSession,
+		/// Cannot merge rings while a suspension session is in progress.
+		SuspensionSessionInProgress,
 		/// Call is too late or too early.
 		TimeOutOfRange,
+		/// Personhood cannot be resumed if it is not suspended.
+		NotSuspended,
+		/// The onboarding queue pages are already defragmented and cannot be merged.
+		QueueStable,
 	}
 
 	#[pallet::origin]
@@ -389,31 +457,81 @@ pub mod pallet {
 			// person");
 			assert!(
 				OnboardingSize::<T>::get() <= <T as Config>::MaxRingSize::get(),
-				"onboarding size must less than or equal to max ring size"
+				"onboarding size must be less than or equal to max ring size"
+			);
+			assert!(
+				<T as Config>::MaxRingSize::get() <= <T as Config>::OnboardingQueuePageSize::get(),
+				"onboarding queue page size must greater than or equal to max ring size"
 			);
 		}
 
 		fn offchain_worker(block_number: BlockNumberFor<T>) {
+			// Check if there are any rings with suspensions and try to clean the first one.
+			if let Some((ring_index, suspended_count)) = PendingSuspensions::<T>::iter().next() {
+				if Self::should_remove_suspended_people(ring_index) {
+					if let Some(suspended_indices) =
+						Self::construct_suspended_indices(ring_index, suspended_count)
+					{
+						let res =
+							Self::submit_unsigned_transaction(Call::remove_suspended_people {
+								ring_index,
+								suspended_indices,
+							});
+						Self::log_offchain_worker_tx_submit_result(res, "remove_suspended_people");
+					}
+				}
+			}
+
+			// Check if the top queue pages can be merged to defragment the list.
+			if (block_number % T::QueuePageMergingInterval::get()).saturated_into::<u32>() != 0 &&
+				matches!(Self::should_merge_queue_pages(), QueueMergeAction::Merge { .. })
+			{
+				let res = Self::submit_unsigned_transaction(Call::merge_queue_pages {});
+				Self::log_offchain_worker_tx_submit_result(res, "merge_queue_pages");
+			}
+
+			// Check the top ring to try to onboard people, then find the first that needs baking
+			let current_ring = CurrentRingIndex::<T>::get();
+			let limit =
+				RingBuildingPeopleLimit::<T>::get().unwrap_or_else(OnboardingSize::<T>::get);
+			let top_ring_status = RingKeysStatus::<T>::get(current_ring);
+			let open_slots = T::MaxRingSize::get().saturating_sub(top_ring_status.total);
+			let onboarding_size = OnboardingSize::<T>::get();
+			let (mut head, tail) = QueuePageIndices::<T>::get();
+			let mut keys_to_include: u32 = OnboardingQueue::<T>::take(head).len().saturated_into();
+			// A `head != tail` condition should mean that there is at least one key in the page
+			// following this one.
+			if keys_to_include < open_slots && head != tail {
+				head = head.checked_add(1).unwrap_or(0);
+				keys_to_include = keys_to_include
+					.saturating_add(OnboardingQueue::<T>::take(head).len().saturated_into());
+			}
+			if Self::should_onboard_people(
+				current_ring,
+				&top_ring_status,
+				open_slots,
+				keys_to_include,
+				onboarding_size,
+			)
+			.is_some()
+			{
+				let res = Self::submit_unsigned_transaction(Call::onboard_people {});
+				Self::log_offchain_worker_tx_submit_result(res, "onboard_people");
+			}
+
 			// Only attempt ring baking every N blocks to reduce contention
 			if (block_number % T::RingBakingInterval::get()).saturated_into::<u32>() != 0 {
 				return;
 			}
 
-			// Scan backward from the current ring to find the first that needs baking
-			let current_ring = CurrentRingIndex::<T>::get();
 			for ring_index in (0..=current_ring).rev() {
-				if Self::should_build_ring(ring_index) {
-					let call = Call::build_ring { ring_index };
-
-					let xt = T::create_inherent(call.into());
-					let res = SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
-
-					match res {
-						Ok(_) =>
-							log::info!(target: LOG_TARGET, "offchain_worker - ring baking transaction submitted"),
-						Err(e) =>
-							log::error!(target: LOG_TARGET, "offchain_worker - failed to submit ring baking transaction: {:?}", e),
-					}
+				let ring_status = RingKeysStatus::<T>::get(ring_index);
+				if Self::should_build_ring(ring_index, &ring_status, limit).is_some() {
+					let res = Self::submit_unsigned_transaction(Call::build_ring {
+						ring_index,
+						limit: Some(limit),
+					});
+					Self::log_offchain_worker_tx_submit_result(res, "build_ring");
 				}
 			}
 		}
@@ -425,16 +543,94 @@ pub mod pallet {
 
 		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
 			match call {
-				Call::build_ring { ring_index } => {
+				Call::build_ring { ring_index, limit } => {
+					let ring_status = RingKeysStatus::<T>::get(ring_index);
 					// Make sure the ring requires baking
-					if !Self::should_build_ring(*ring_index) {
+					if Self::should_build_ring(
+						*ring_index,
+						&ring_status,
+						limit.unwrap_or_else(T::MaxRingSize::get),
+					)
+					.is_none()
+					{
 						return InvalidTransaction::Stale.into();
 					}
 
-					let tx_longevity = T::MaxBakingDelay::get();
+					let tx_longevity = T::MaxTaskLifespan::get();
 
 					ValidTransaction::with_tag_prefix("PersonhoodRingBaking")
 						.and_provides(ring_index)
+						.longevity(tx_longevity.saturated_into())
+						.propagate(true)
+						.build()
+				},
+				Call::onboard_people {} => {
+					let current_ring = CurrentRingIndex::<T>::get();
+					let top_ring_status = RingKeysStatus::<T>::get(current_ring);
+					let open_slots = T::MaxRingSize::get().saturating_sub(top_ring_status.total);
+					let onboarding_size = OnboardingSize::<T>::get();
+					let (mut head, tail) = QueuePageIndices::<T>::get();
+					let mut keys_to_include: u32 =
+						OnboardingQueue::<T>::take(head).len().saturated_into();
+					// A `head != tail` condition should mean that there is at least one key in the
+					// page following this one.
+					if keys_to_include < open_slots && head != tail {
+						head = head.checked_add(1).unwrap_or(0);
+						keys_to_include = keys_to_include.saturating_add(
+							OnboardingQueue::<T>::take(head).len().saturated_into(),
+						);
+					}
+					// Make sure the ring requires baking
+					if Self::should_onboard_people(
+						current_ring,
+						&top_ring_status,
+						open_slots,
+						keys_to_include,
+						onboarding_size,
+					)
+					.is_none()
+					{
+						return InvalidTransaction::Stale.into();
+					}
+
+					let tx_longevity = T::MaxTaskLifespan::get();
+
+					ValidTransaction::with_tag_prefix("PersonhoodOnboarding")
+						.and_provides(current_ring)
+						.longevity(tx_longevity.saturated_into())
+						.propagate(true)
+						.build()
+				},
+				Call::remove_suspended_people { ring_index, suspended_indices } => {
+					let keys = RingKeys::<T>::get(ring_index);
+					// Make sure the ring requires cleaning and that the provided indices are valid
+					if !Self::should_remove_suspended_people(*ring_index) ||
+						!Self::validate_suspended_indices(
+							*ring_index,
+							&keys[..],
+							&suspended_indices[..],
+						) {
+						return InvalidTransaction::Stale.into();
+					}
+
+					let tx_longevity = T::MaxTaskLifespan::get();
+
+					ValidTransaction::with_tag_prefix("PersonhoodSuspendedPeopleRemoval")
+						.and_provides(ring_index)
+						.longevity(tx_longevity.saturated_into())
+						.propagate(true)
+						.build()
+				},
+				Call::merge_queue_pages {} => {
+					let QueueMergeAction::Merge { new_head, .. } = Self::should_merge_queue_pages()
+					else {
+						return InvalidTransaction::Stale.into();
+					};
+
+					let tx_longevity = T::MaxTaskLifespan::get();
+
+					ValidTransaction::with_tag_prefix("PersonhoodMergeQueuePages")
+						.and_provides(new_head)
 						.longevity(tx_longevity.saturated_into())
 						.propagate(true)
 						.build()
@@ -488,16 +684,26 @@ pub mod pallet {
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// Builds a fully populated ring.
+		/// Build a ring root by including registered people.
+		///
+		/// This is a task!!
 		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(100)]
-		pub fn build_ring(origin: OriginFor<T>, ring_index: RingIndex) -> DispatchResult {
+		pub fn build_ring(
+			origin: OriginFor<T>,
+			ring_index: RingIndex,
+			limit: Option<u32>,
+		) -> DispatchResult {
 			ensure_none(origin)?;
 
-			ensure!(Self::should_build_ring(ring_index), Error::<T>::StillFresh);
-
-			let mut keys = RingKeys::<T>::get(ring_index);
-			let keys_len = keys.keys.len() as u32;
+			// Get the keys for this ring, and make sure that the ring is full before we build it.
+			let (keys, mut ring_status) = Self::ring_keys_and_info(ring_index);
+			let to_include = Self::should_build_ring(
+				ring_index,
+				&ring_status,
+				limit.unwrap_or_else(T::MaxRingSize::get),
+			)
+			.ok_or(Error::<T>::StillFresh)?;
 
 			// Get the current ring, and check it should be rebuilt.
 			// Return the next revision.
@@ -514,7 +720,7 @@ pub mod pallet {
 				};
 
 			// Push each member.
-			for key in keys.keys.iter().skip(keys.included as usize) {
+			for key in keys.iter().skip(ring_status.included as usize).take(to_include as usize) {
 				let did_push =
 					T::Crypto::push_member(&mut intermediate, key.clone(), |chunk_idx| {
 						// TODO SHAWN: Is there some way for me to optimize this out of the
@@ -524,23 +730,290 @@ pub mod pallet {
 							.and_then(|page| {
 								page.get(chunk_idx % (chunk_page_size as usize)).cloned()
 							})
+							.defensive()
 							.ok_or(())
 					})
 					.is_ok();
 				ensure!(did_push, Error::<T>::CouldNotPush);
 			}
 
-			// By the end of the loop, we have included all the keys in the vector.
-			keys.included = keys_len;
-
-			// This is for the Nova Team <3
-			RingKeysMeta::<T>::insert(ring_index, (keys_len, keys.included));
+			// By the end of the loop, we have included the maximum number of keys in the vector.
+			ring_status.included = ring_status.included.saturating_add(to_include);
+			RingKeysStatus::<T>::insert(ring_index, ring_status);
 
 			// We create the root after pushing all members.
 			let root = T::Crypto::finish_members(intermediate.clone());
 			let ring_root = RingRoot { root, revision: next_revision, intermediate };
 			Root::<T>::insert(ring_index, ring_root);
-			RingKeys::<T>::insert(ring_index, keys);
+
+			Ok(())
+		}
+
+		/// Onboard people into a ring by taking their keys from the onboarding queue and
+		/// registering them into the ring. This does not compute the root, that is done using
+		/// `build_ring`.
+		///
+		/// This is a task!!
+		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(105)]
+		pub fn onboard_people(origin: OriginFor<T>) -> DispatchResult {
+			ensure_none(origin)?;
+
+			// Get the keys for this ring, and make sure that the ring is full before we build it.
+			let (top_ring_index, mut keys) = Self::available_ring();
+			let mut ring_status = RingKeysStatus::<T>::get(top_ring_index);
+			defensive_assert!(
+				keys.len() == ring_status.total as usize,
+				"Stored key count doesn't match the actual length"
+			);
+
+			let keys_len = keys.len() as u32;
+			let open_slots = T::MaxRingSize::get().saturating_sub(keys_len);
+
+			let (mut head, tail) = QueuePageIndices::<T>::get();
+			let old_head = head;
+			let mut keys_to_include: Vec<MemberOf<T>> =
+				OnboardingQueue::<T>::take(head).into_inner();
+			// A `head != tail` condition should mean that there is at least one key in the page
+			// following this one.
+			if keys_to_include.len() < open_slots as usize && head != tail {
+				head = head.checked_add(1).unwrap_or(0);
+				let second_key_page = OnboardingQueue::<T>::take(head);
+				defensive_assert!(!second_key_page.is_empty());
+				keys_to_include.extend(second_key_page.into_iter());
+			}
+
+			let onboarding_size = OnboardingSize::<T>::get();
+
+			let (to_include, ring_filled) = Self::should_onboard_people(
+				top_ring_index,
+				&ring_status,
+				open_slots,
+				keys_to_include.len().saturated_into(),
+				onboarding_size,
+			)
+			.ok_or(Error::<T>::Incomplete)?;
+
+			let mut remaining_keys = keys_to_include.split_off(to_include as usize);
+			for key in keys_to_include.into_iter() {
+				let personal_id = Keys::<T>::get(&key).defensive().ok_or(Error::<T>::NotPerson)?;
+				let mut record =
+					People::<T>::get(personal_id).defensive().ok_or(Error::<T>::KeyNotFound)?;
+				record.position = RingPosition::Included {
+					ring_index: top_ring_index,
+					ring_position: keys.len().saturated_into(),
+				};
+				People::<T>::insert(personal_id, record);
+				keys.try_push(key).map_err(|_| Error::<T>::TooManyMembers)?;
+			}
+			RingKeys::<T>::insert(top_ring_index, keys);
+			ActiveMembers::<T>::mutate(|active| *active = active.saturating_add(to_include));
+			ring_status.total = ring_status.total.saturating_add(to_include);
+			RingKeysStatus::<T>::insert(top_ring_index, ring_status);
+
+			// Update the top ring index if this onboarding round filled the current ring.
+			if ring_filled {
+				CurrentRingIndex::<T>::mutate(|i| i.saturating_inc());
+			}
+
+			if remaining_keys.len() > T::OnboardingQueuePageSize::get() as usize {
+				let split_idx =
+					remaining_keys.len().saturating_sub(T::OnboardingQueuePageSize::get() as usize);
+				let second_page_keys: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize> =
+					remaining_keys
+						.split_off(split_idx)
+						.try_into()
+						.expect("the list shrunk so it must fit; qed");
+				let remaining_keys: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize> =
+					remaining_keys.try_into().expect("the list shrunk so it must fit; qed");
+				OnboardingQueue::<T>::insert(old_head, remaining_keys);
+				OnboardingQueue::<T>::insert(head, second_page_keys);
+				QueuePageIndices::<T>::put((old_head, tail));
+			} else {
+				let remaining_keys: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize> =
+					remaining_keys.try_into().expect("the list shrunk so it must fit; qed");
+				OnboardingQueue::<T>::insert(head, remaining_keys);
+				QueuePageIndices::<T>::put((head, tail));
+			}
+
+			Ok(())
+		}
+
+		/// Task that merges two rings. In order for the rings to be eligible for merging, they must
+		/// be below 1/2 of max capacity, have no pending suspensions and not be the top ring used
+		/// for onboarding.
+		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(110)]
+		pub fn merge_rings(
+			_origin: OriginFor<T>,
+			base_ring_index: RingIndex,
+			target_ring_index: RingIndex,
+		) -> DispatchResult {
+			ensure!(
+				MutationSessionCounter::<T>::get() == 0,
+				Error::<T>::SuspensionSessionInProgress
+			);
+			// Top ring that onboards new candidates cannot be merged. Identical rings cannot be
+			// merged.
+			let current_ring_index = CurrentRingIndex::<T>::get();
+			ensure!(
+				base_ring_index != target_ring_index &&
+					base_ring_index != current_ring_index &&
+					target_ring_index != current_ring_index,
+				Error::<T>::InvalidRing
+			);
+
+			// Enforce eligibility criteria.
+			let (mut base_keys, mut base_ring_status) = Self::ring_keys_and_info(base_ring_index);
+			ensure!(
+				base_keys.len() < T::MaxRingSize::get() as usize / 2,
+				Error::<T>::RingAboveMergeThreshold
+			);
+			ensure!(
+				PendingSuspensions::<T>::get(base_ring_index) == 0,
+				Error::<T>::SuspensionsPending
+			);
+			let target_keys = RingKeys::<T>::get(target_ring_index);
+			RingKeysStatus::<T>::remove(target_ring_index);
+			ensure!(
+				target_keys.len() < T::MaxRingSize::get() as usize / 2,
+				Error::<T>::RingAboveMergeThreshold
+			);
+			ensure!(
+				PendingSuspensions::<T>::get(target_ring_index) == 0,
+				Error::<T>::SuspensionsPending
+			);
+
+			// Update the status of the ring to reflect the newly added keys.
+			base_ring_status.total =
+				base_ring_status.total.saturating_add(target_keys.len().saturated_into());
+
+			for key in target_keys {
+				let personal_id =
+					Keys::<T>::get(&key).defensive().ok_or(Error::<T>::KeyNotFound)?;
+				let mut record =
+					People::<T>::get(personal_id).defensive().ok_or(Error::<T>::NotPerson)?;
+				record.position = RingPosition::Included {
+					ring_index: base_ring_index,
+					ring_position: base_keys.len().saturated_into(),
+				};
+				base_keys.try_push(key).map_err(|_| Error::<T>::TooManyMembers)?;
+				People::<T>::insert(personal_id, record)
+			}
+
+			// Newly added keys are not yet included.
+			RingKeys::<T>::insert(base_ring_index, base_keys);
+			RingKeysStatus::<T>::insert(base_ring_index, base_ring_status);
+			// Remove the stale ring root of the target ring. The keys in the target ring will be
+			// part of a valid ring root again when the base ring is rebuilt.
+			Root::<T>::remove(target_ring_index);
+			RingKeys::<T>::remove(target_ring_index);
+			RingKeysStatus::<T>::remove(target_ring_index);
+
+			Ok(())
+		}
+
+		/// Task to remove people marked as suspended from the rings. The offchain worker must
+		/// provide the list of indices of suspended people's keys in the ring. These indices must
+		/// be in ascending order and refer to people that are actually suspended. The list has to
+		/// be exhaustive, as one call to this function should remove all suspended people. In
+		/// practice, this should be feasible as ring sizes are still small and there isn't a lot of
+		/// computation happening per removed person.
+		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(111)]
+		pub fn remove_suspended_people(
+			origin: OriginFor<T>,
+			ring_index: RingIndex,
+			suspended_indices: BoundedVec<u32, T::MaxRingSize>,
+		) -> DispatchResult {
+			let keys = RingKeys::<T>::get(ring_index);
+			if !Self::should_remove_suspended_people(ring_index) {
+				return Err(Error::<T>::InvalidSuspensions.into());
+			}
+			// If there is no origin, then this is an unsigned transaction already validated through
+			// `ValidateUnsigned`, so we don't need to check the validity of the indices again.
+			if ensure_none(origin).is_err() &&
+				!Self::validate_suspended_indices(ring_index, &keys[..], &suspended_indices[..])
+			{
+				return Err(Error::<T>::InvalidSuspensions.into());
+			}
+
+			// Construct the new keys map by skipping the suspended keys. This should prevent
+			// reallocations in the `Vec` which happens with `remove`.
+			let mut new_keys: BoundedVec<MemberOf<T>, T::MaxRingSize> = Default::default();
+			let mut j = 0;
+			for (i, key) in keys.into_iter().enumerate() {
+				if j < suspended_indices.len() && i == suspended_indices[j] as usize {
+					j += 1;
+				} else {
+					new_keys.try_push(key).map_err(|_| Error::<T>::TooManyMembers)?;
+				}
+			}
+
+			let suspended_count = RingKeysStatus::<T>::mutate(ring_index, |ring_status| {
+				let new_total = new_keys.len().saturated_into();
+				let suspended_count = ring_status.total.saturating_sub(new_total);
+				ring_status.total = new_total;
+				ring_status.included = 0;
+				suspended_count
+			});
+			ActiveMembers::<T>::mutate(|active| *active = active.saturating_sub(suspended_count));
+			RingKeys::<T>::insert(ring_index, new_keys);
+			Root::<T>::mutate(ring_index, |maybe_root| {
+				if let Some(root) = maybe_root {
+					// The revision will be incremented on the next call of `build_ring`. The
+					// current root is preserved.
+					root.intermediate = T::Crypto::start_members();
+				}
+			});
+
+			// Make sure to remove the entry from the map so that the offchain worker doesn't
+			// iterate over it.
+			PendingSuspensions::<T>::remove(ring_index);
+
+			Ok(())
+		}
+
+		/// Task to merge the two pages at the front of the onboarding queue, if possible. After a
+		/// round of suspensions, it is possible for the second page of the onboarding queue to be
+		/// left with few members such that, if the first page also has few members, the total count
+		/// is below the required onboarding size, thus stalling the queue. This task fixes this by
+		/// moving the people from the first page to the front of the second page, defragmenting the
+		/// queue. While this task is scheduled to check for possible queue fragmentation every
+		/// `T::QueuePageMergingInterval` blocks, this can also be done through an unsigned call.
+		///
+		/// This is a task!!
+		#[pallet::weight(Weight::zero())]
+		#[pallet::call_index(106)]
+		pub fn merge_queue_pages(origin: OriginFor<T>) -> DispatchResult {
+			ensure_none(origin)?;
+
+			let QueueMergeAction::Merge {
+				initial_head,
+				new_head,
+				mut first_key_page,
+				second_key_page,
+			} = Self::should_merge_queue_pages()
+			else {
+				return Err(Error::<T>::QueueStable.into());
+			};
+
+			// Update the records of the people in the first page.
+			for key in first_key_page.iter() {
+				let personal_id = Keys::<T>::get(key).defensive().ok_or(Error::<T>::NotPerson)?;
+				let mut record =
+					People::<T>::get(personal_id).defensive().ok_or(Error::<T>::KeyNotFound)?;
+				record.position = RingPosition::Onboarding { queue_page: new_head };
+				People::<T>::insert(personal_id, record);
+			}
+
+			first_key_page
+				.try_extend(second_key_page.into_iter())
+				.defensive()
+				.map_err(|_| Error::<T>::TooManyMembers)?;
+			OnboardingQueue::<T>::remove(initial_head);
+			OnboardingQueue::<T>::insert(new_head, first_key_page);
+			QueuePageIndices::<T>::mutate(|(h, _)| *h = new_head);
 
 			Ok(())
 		}
@@ -765,26 +1238,173 @@ pub mod pallet {
 	}
 
 	impl<T: Config> Pallet<T> {
-		/// Ensures conditions are met to build a ring.
-		fn should_build_ring(ring_index: RingIndex) -> bool {
-			if !RingKeys::<T>::contains_key(ring_index) {
-				return false
+		/// If the conditions to build a ring are met, this function returns the number of people to
+		/// be included in a `build_ring` call. Otherwise, this function returns `None`.
+		fn should_build_ring(
+			ring_index: RingIndex,
+			ring_status: &RingStatus,
+			limit: u32,
+		) -> Option<u32> {
+			// Ring root cannot be built while there are people to remove.
+			if MutationSessionCounter::<T>::get() != 0 {
+				return None;
+			}
+			// Suspended people should be removed from the ring before building it.
+			if PendingSuspensions::<T>::get(ring_index) != 0 {
+				return None;
 			}
 
+			let not_included_count = ring_status.total.saturating_sub(ring_status.included);
+			let to_include = not_included_count.min(limit);
+			// There must be at least one person waiting to be included to build the ring.
+			if to_include == 0 {
+				return None;
+			}
+
+			Some(to_include)
+		}
+
+		/// If the conditions to onboard new people into rings are met, this function returns the
+		/// number of people to be onboarded from the queue in a `onboard_people` call along with a
+		/// flag which states whether the call will completely populate the ring. Otherwise, this
+		/// function returns `None`.
+		fn should_onboard_people(
+			ring_index: RingIndex,
+			ring_status: &RingStatus,
+			open_slots: u32,
+			available_for_inclusion: u32,
+			onboarding_size: u32,
+		) -> Option<(u32, bool)> {
+			// People cannot be onboarded while suspensions are ongoing.
+			if MutationSessionCounter::<T>::get() != 0 {
+				return None;
+			}
+
+			// Suspended people should be removed from the ring before building it.
+			if PendingSuspensions::<T>::get(ring_index) != 0 {
+				return None;
+			}
+
+			let to_include = available_for_inclusion.min(open_slots);
+			// If everything is already included, nothing to do.
+			if to_include == 0 {
+				return None;
+			}
+
+			// Here we check we have enough items in the queue so that the onboarding group size is
+			// respected, but also that we can support another queue of at least onboarding size
+			// in a future call.
+			let can_onboard_with_cohort = to_include >= onboarding_size &&
+				ring_status.total.saturating_add(to_include.saturated_into()) <=
+					T::MaxRingSize::get().saturating_sub(onboarding_size);
+			// If this call completely fills the ring, no onboarding rule enforcement will be
+			// necessary.
+			let ring_filled = open_slots == to_include;
+
+			let should_onboard = ring_filled || can_onboard_with_cohort;
+			if !should_onboard {
+				return None;
+			}
+
+			Some((to_include, ring_filled))
+		}
+
+		/// Returns whether the provided suspensions are valid for a given ring index and a cleanup
+		/// is necessary.
+		fn should_remove_suspended_people(ring_index: RingIndex) -> bool {
+			if MutationSessionCounter::<T>::get() != 0 {
+				return false;
+			}
+			let suspended_count = PendingSuspensions::<T>::get(ring_index);
+			// There must be keys to suspend.
+			if suspended_count == 0 {
+				return false;
+			}
+
+			true
+		}
+
+		/// Function that checks if the top two onboarding queue pages can be merged into a single
+		/// page to defragment the list. This function returns an action to take following the
+		/// check. In case a merge is needed, the following information is provided, in order:
+		/// * The initial `head` of the queue - will need to remove the page at this index in case
+		///   the merge is performed.
+		/// * The new `head` of the queue.
+		/// * The keys on the first page of the queue.
+		/// * The keys on the second page of the queue.
+		fn should_merge_queue_pages() -> QueueMergeAction<T> {
+			let (initial_head, tail) = QueuePageIndices::<T>::get();
+			let first_key_page = OnboardingQueue::<T>::get(initial_head);
+			// A `head != tail` condition should mean that there is at least one more page
+			// following this one.
+			if initial_head == tail {
+				return QueueMergeAction::NoAction;
+			}
+			let new_head = initial_head.checked_add(1).unwrap_or(0);
+			let second_key_page = OnboardingQueue::<T>::get(new_head);
+
+			let page_size = T::OnboardingQueuePageSize::get();
+			// Make sure the pages can be merged.
+			if first_key_page.len().saturating_add(second_key_page.len()) > page_size as usize {
+				return QueueMergeAction::NoAction;
+			}
+
+			QueueMergeAction::Merge { initial_head, new_head, first_key_page, second_key_page }
+		}
+
+		fn validate_suspended_indices(
+			ring_index: RingIndex,
+			keys: &[MemberOf<T>],
+			suspended_indices: &[u32],
+		) -> bool {
+			// The provided indices length must be exactly the same as the number of people to be
+			// removed.
+			if suspended_indices.len() != PendingSuspensions::<T>::get(ring_index) as usize {
+				return false;
+			}
+			let mut last_index = None;
+			for i in suspended_indices.iter() {
+				// The suspended indices must be in ascending order.
+				if last_index.map_or(false, |last| last >= *i) {
+					return false;
+				}
+
+				// Make sure the index refers to a suspended person who should be removed.
+				let Some(key) = keys.get(*i as usize) else {
+					return false;
+				};
+				let Some(personal_id) = Keys::<T>::get(key) else {
+					return false;
+				};
+				let Some(record) = People::<T>::get(personal_id) else {
+					return false;
+				};
+				if !record.position.suspended() {
+					return false;
+				}
+
+				last_index = Some(*i);
+			}
+
+			true
+		}
+
+		fn construct_suspended_indices(
+			ring_index: RingIndex,
+			suspended_count: u32,
+		) -> Option<BoundedVec<u32, T::MaxRingSize>> {
 			let keys = RingKeys::<T>::get(ring_index);
-			let keys_len = keys.keys.len() as u32;
-
-			let not_included_count = keys_len.saturating_sub(keys.included);
-			if not_included_count.is_zero() {
-				return false
+			let mut suspended_indices: BoundedVec<u32, T::MaxRingSize> = Default::default();
+			for (i, key) in keys.iter().enumerate() {
+				let personal_id = Keys::<T>::get(key).unwrap();
+				if People::<T>::get(personal_id).is_some_and(|record| record.position.suspended()) {
+					suspended_indices.try_push(i.saturated_into()).ok()?;
+				}
 			}
-
-			// Here we check we have enough items in the queue, and that we can support another
-			// queue. TODO: Make this number configurable on how many we update at a time.
-			let queue_full = not_included_count >= OnboardingSize::<T>::get() &&
-				(T::MaxRingSize::get() - keys_len) >= OnboardingSize::<T>::get();
-
-			keys.keys.is_full() || queue_full
+			if suspended_count as usize != suspended_indices.len() {
+				return None;
+			}
+			Some(suspended_indices)
 		}
 
 		fn derivative_call(
@@ -822,25 +1442,26 @@ pub mod pallet {
 			Ok(ensure_personal_alias(origin.into_caller())?)
 		}
 
-		// This function always returns the ring index and
-		pub fn available_ring() -> (RingIndex, KeysForRing<T>) {
+		// This function always returns the ring index and the keys for the ring which is currently
+		// accepting new members.
+		pub fn available_ring() -> (RingIndex, BoundedVec<MemberOf<T>, T::MaxRingSize>) {
 			let mut current_ring_index = CurrentRingIndex::<T>::get();
 			let mut current_keys = RingKeys::<T>::get(current_ring_index);
 
-			debug_assert!(
-				!current_keys.keys.is_full(),
+			defensive_assert!(
+				!current_keys.is_full(),
 				"Something bad happened inside the STF, where the current keys are full, but we should have incremented in that case."
 			);
 
 			// This condition shouldn't be reached, but we handle the error just in case.
-			if current_keys.keys.is_full() {
+			if current_keys.is_full() {
 				current_ring_index.saturating_inc();
 				CurrentRingIndex::<T>::put(current_ring_index);
 				current_keys = RingKeys::<T>::get(current_ring_index);
 			}
 
-			debug_assert!(
-				!current_keys.keys.is_full(),
+			defensive_assert!(
+				!current_keys.is_full(),
 				"Something bad happened inside the STF, where the current key and next key are both full. Nothing we can do here."
 			);
 
@@ -851,45 +1472,129 @@ pub mod pallet {
 		pub fn do_insert_key(who: PersonalId, key: MemberOf<T>) -> DispatchResult {
 			// If the key is already in use by another person then error.
 			ensure!(!Keys::<T>::contains_key(&key), Error::<T>::KeyAlreadyInUse);
+			// This is a first time key, so it must be reserved.
+			ensure!(
+				ReservedPersonalId::<T>::take(who).is_some(),
+				Error::<T>::PersonalIdNotReservedOrNotRecognized
+			);
 
-			// Check if the person has already been onboarded.
-			if let Some(old_record) = People::<T>::get(who) {
-				// If already recognized with same key then nothing to do.
-				ensure!(old_record.key != key, Error::<T>::SameKey);
-			}
+			Self::push_to_onboarding_queue(who, key, None)
+		}
 
-			let (mut current_ring_index, mut current_keys) = Self::available_ring();
+		// Enqueue personhood suspensions. This function can be called multiple times until all
+		// people are marked as suspended, but it can only happen while there is a mutation session
+		// in progress.
+		pub fn queue_personhood_suspensions(suspensions: &[PersonalId]) -> DispatchResult {
+			ensure!(MutationSessionCounter::<T>::get() > 0, Error::<T>::NoMutationSession);
+			for who in suspensions {
+				let mut record = People::<T>::get(who).ok_or(Error::<T>::InvalidSuspensions)?;
+				match record.position {
+					RingPosition::Included { ring_index, .. } => {
+						let mut suspended_count = PendingSuspensions::<T>::get(ring_index);
+						suspended_count.saturating_inc();
+						PendingSuspensions::<T>::insert(ring_index, suspended_count);
+					},
+					RingPosition::Onboarding { queue_page } => {
+						let mut keys = OnboardingQueue::<T>::get(queue_page);
+						let queue_idx = keys.iter().position(|k| *k == record.key);
+						if let Some(idx) = queue_idx {
+							// It is expensive to shift the whole vec in the worst case to remove a
+							// suspended person from onboarding, but the pages will be small and
+							// suspension of people who are not yet onboarded is supposed to be
+							// extremely rare if not impossible as the offchain worker should have
+							// plenty of time to include someone recognized before the beginning of
+							// the next suspension round. The only legitimate case when this could
+							// happen is if someone is sitting in the onboarding queue for a long
+							// time and cannot be included because not enough people are joining,
+							// but it should be a rare case.
+							keys.remove(idx);
+							OnboardingQueue::<T>::insert(queue_page, keys);
+						} else {
+							defensive!(
+								"No key found at the position in the person record of {}",
+								who
+							);
+						}
+					},
+					RingPosition::Suspended => {
+						defensive!("Suspension queued for person {} while already suspended", who);
+					},
+				}
 
-			// This should also never happen, but we handle the error just in case.
-			current_keys
-				.keys
-				.try_push(key.clone())
-				.map_err(|_| Error::<T>::TooManyMembers)?;
-			// Update the list of keys.
-			RingKeys::<T>::insert(current_ring_index, &current_keys);
-			let keys_len = current_keys.keys.len() as u32;
+				record.position = RingPosition::Suspended;
+				if let Some(account) = record.account {
+					AccountToPersonalId::<T>::remove(account);
+					record.account = None;
+				}
 
-			let record = PersonRecord {
-				key: key.clone(),
-				ring_index: current_ring_index,
-				key_index: keys_len,
-				account: None,
-			};
-			Self::deposit_event(Event::<T>::PersonhoodRecognized { who, key });
-			Keys::<T>::insert(&record.key, who);
-			People::<T>::insert(who, &record);
-			// For the Nova team <3
-			RingKeysMeta::<T>::mutate(current_ring_index, |(total, _included): &mut (u32, u32)| {
-				*total = keys_len;
-			});
-
-			// If the ring is full, we start building the next ring.
-			if current_keys.keys.is_full() {
-				current_ring_index.saturating_inc();
-				CurrentRingIndex::<T>::put(current_ring_index);
+				People::<T>::insert(who, record);
 			}
 
 			Ok(())
+		}
+
+		// Resume someone's personhood. This assumes that their personhood is currently suspended,
+		// so the person was previously recognized.
+		pub fn resume_personhood(who: PersonalId) -> DispatchResult {
+			let record = People::<T>::get(who).ok_or(Error::<T>::NotPerson)?;
+			ensure!(record.position.suspended(), Error::<T>::NotSuspended);
+			ensure!(Keys::<T>::get(&record.key) == Some(who), Error::<T>::NoKey);
+
+			Self::push_to_onboarding_queue(who, record.key, record.account)
+		}
+
+		fn push_to_onboarding_queue(
+			who: PersonalId,
+			key: MemberOf<T>,
+			account: Option<T::AccountId>,
+		) -> DispatchResult {
+			let (head, mut tail) = QueuePageIndices::<T>::get();
+			let mut keys = OnboardingQueue::<T>::get(tail);
+			if let Err(k) = keys.try_push(key.clone()) {
+				tail = tail.checked_add(1).unwrap_or(0);
+				ensure!(tail != head, Error::<T>::TooManyMembers);
+				keys = alloc::vec![k].try_into().expect("must be able to hold one key; qed");
+			};
+
+			let record = PersonRecord {
+				key,
+				position: RingPosition::Onboarding { queue_page: tail },
+				account,
+			};
+			Keys::<T>::insert(&record.key, who);
+			People::<T>::insert(who, &record);
+			Self::deposit_event(Event::<T>::PersonhoodResumed { who, key: record.key });
+
+			QueuePageIndices::<T>::put((head, tail));
+			OnboardingQueue::<T>::insert(tail, keys);
+			Ok(())
+		}
+
+		/// Fetch the keys in a ring along with stored inclusion information.
+		pub fn ring_keys_and_info(
+			ring_index: RingIndex,
+		) -> (BoundedVec<MemberOf<T>, T::MaxRingSize>, RingStatus) {
+			let keys = RingKeys::<T>::get(ring_index);
+			let ring_status = RingKeysStatus::<T>::get(ring_index);
+			defensive_assert!(
+				keys.len() == ring_status.total as usize,
+				"Stored key count doesn't match the actual length"
+			);
+			(keys, ring_status)
+		}
+
+		fn log_offchain_worker_tx_submit_result(res: Result<(), ()>, operation: &str) {
+			match res {
+				Ok(_) =>
+					log::info!(target: LOG_TARGET, "offchain_worker - {} transaction submitted", operation),
+				Err(e) =>
+					log::error!(target: LOG_TARGET, "offchain_worker - failed to submit {} transaction: {:?}", operation, e),
+			}
+		}
+
+		fn submit_unsigned_transaction(call: Call<T>) -> Result<(), ()> {
+			let xt = T::create_inherent(call.into());
+			SubmitTransaction::<T, Call<T>>::submit_transaction(xt)
 		}
 	}
 
@@ -928,18 +1633,10 @@ pub mod pallet {
 			who: PersonalId,
 			maybe_key: Option<MemberOf<T>>,
 		) -> Result<(), DispatchError> {
-			ensure!(
-				ReservedPersonalId::<T>::contains_key(who) || People::<T>::contains_key(who),
-				Error::<T>::PersonalIdNotReservedOrNotRecognized
-			);
-
-			// If no key is being provided, then bail now.
-			let Some(key) = maybe_key else { return Err(Error::<T>::NoKey.into()) };
-			Self::do_insert_key(who, key)?;
-
-			ReservedPersonalId::<T>::remove(who);
-
-			Ok(())
+			match maybe_key {
+				Some(key) => Self::do_insert_key(who, key),
+				None => Self::resume_personhood(who),
+			}
 		}
 
 		fn verify_signature(signer: PersonalId, msg: &[u8], signature: &Self::Signature) -> bool {
@@ -969,6 +1666,26 @@ pub mod pallet {
 		) -> Self::Signature {
 			// SHAWN TODO: implement this.
 			unimplemented!()
+		}
+	}
+
+	impl<T: Config> PeopleTrait for Pallet<T> {
+		fn suspend_personhood(suspensions: &[PersonalId]) -> DispatchResult {
+			Self::queue_personhood_suspensions(suspensions)
+		}
+		fn start_people_set_mutation_session() -> DispatchResult {
+			let current_counter = MutationSessionCounter::<T>::get();
+			MutationSessionCounter::<T>::put(
+				current_counter.checked_add(1).ok_or(ArithmeticError::Overflow)?,
+			);
+			Ok(())
+		}
+		fn end_people_set_mutation_session() -> DispatchResult {
+			let current_counter = MutationSessionCounter::<T>::get();
+			MutationSessionCounter::<T>::put(
+				current_counter.checked_sub(1).ok_or(ArithmeticError::Underflow)?,
+			);
+			Ok(())
 		}
 	}
 
@@ -1050,7 +1767,7 @@ pub mod pallet {
 
 	impl<T: Config> CountedMembers for EnsurePersonalAlias<T> {
 		fn active_count() -> u32 {
-			Keys::<T>::count()
+			ActiveMembers::<T>::get()
 		}
 	}
 
@@ -1075,7 +1792,7 @@ pub mod pallet {
 
 	impl<T: Config> CountedMembers for EnsurePersonalAliasInContext<T> {
 		fn active_count() -> u32 {
-			Keys::<T>::count()
+			ActiveMembers::<T>::get()
 		}
 	}
 }

@@ -92,8 +92,10 @@ impl crate::Config for Test {
 	type AccountContexts = ();
 	type ChunkPageSize = ConstU32<4096>;
 	type MaxRingSize = ConstU32<10>;
+	type OnboardingQueuePageSize = ConstU32<40>;
 	type RingBakingInterval = ConstU64<10>;
-	type MaxBakingDelay = ConstU64<5>;
+	type QueuePageMergingInterval = ConstU64<10>;
+	type MaxTaskLifespan = ConstU64<5>;
 }
 
 #[allow(dead_code)]

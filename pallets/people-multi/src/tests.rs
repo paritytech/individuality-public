@@ -49,38 +49,59 @@ fn build_ring_works() {
 		PeoplePallet::set_onboarding_size(RuntimeOrigin::root(), 5).unwrap();
 		// No one to onboard.
 		assert_noop!(
-			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO),
+			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None),
 			Error::<Test>::StillFresh
 		);
 
 		// Not enough for a queue
 		generate_people_with_index(0, 3);
 
+		// People are recognized but not onboarded yet, the ring has 0 members, same as initial
+		// value.
+		assert_eq!(Keys::<Test>::count(), 4);
 		assert_noop!(
-			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO),
+			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None),
 			Error::<Test>::StillFresh
+		);
+
+		// Onboard people
+		assert_noop!(
+			PeoplePallet::onboard_people(RuntimeOrigin::none()),
+			Error::<Test>::Incomplete
 		);
 
 		// Now we have enough to build one.
 		generate_people_with_index(4, 4);
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
 
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO));
+		// There isn't a root yet.
+		assert!(!Root::<Test>::contains_key(0));
+		assert_eq!(RingKeysStatus::<Test>::get(0), RingStatus { total: 5, included: 0 });
+		// Build the root.
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+		assert!(Root::<Test>::contains_key(0));
 
 		// We can add 5 more people
 		generate_people_with_index(5, 9);
 
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO));
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
 
 		// We can add 26 more people
 		generate_people_with_index(10, 35);
 
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1));
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
 
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 2));
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 2, None));
 
 		// Can't build 3, because then there are only 4 spots left which is less than onboarding
 		// size of 5
-		assert_noop!(PeoplePallet::build_ring(RuntimeOrigin::none(), 3), Error::<Test>::StillFresh);
+		assert_noop!(
+			PeoplePallet::onboard_people(RuntimeOrigin::none()),
+			Error::<Test>::Incomplete
+		);
 	});
 }
 
@@ -452,9 +473,7 @@ fn recognize_same_person_2_times() {
 	TestExt::new().execute_with(|| {
 		let person_a = PeoplePallet::reserve_new_id();
 		let secret_a = Simple::new_secret([1; 32]);
-		let secret_b = Simple::new_secret([2; 32]);
 		let key_a = Simple::member_from_secret(&secret_a);
-		let key_b = Simple::member_from_secret(&secret_b);
 		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_a)));
 		assert!(People::<Test>::get(person_a).is_some());
 		assert_noop!(
@@ -465,33 +484,74 @@ fn recognize_same_person_2_times() {
 			PeoplePallet::renew_id_reservation(person_a),
 			Error::<Test>::PersonalIdReservationCannotRenew,
 		);
-		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_b)));
 	});
 }
 
-// #[test]
-// fn recognize_person_with_duplicate_key_after_suspend() {
-// 	TestExt::new().execute_with(|| {
-// 		// Recognize person A
-// 		let person_a = 1u64;
-// 		let secret_a = Simple::new_secret([1; 32]);
-// 		let key_a = Simple::member_from_secret(&secret_a);
-// 		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_a)));
+// TODO George: migrate key test
 
-// 		// Suspend person A
-// 		assert_ok!(PeoplePallet::suspend_index(person_a));
+#[test]
+fn recognize_person_with_duplicate_key_after_suspend() {
+	TestExt::new().execute_with(|| {
+		let person_a = PeoplePallet::reserve_new_id();
+		let person_b = PeoplePallet::reserve_new_id();
+		let person_c = PeoplePallet::reserve_new_id();
+		let secret_a = Simple::new_secret([1; 32]);
+		let secret_b = Simple::new_secret([2; 32]);
+		let secret_c = Simple::new_secret([3; 32]);
+		let key_a = Simple::member_from_secret(&secret_a);
+		let key_b = Simple::member_from_secret(&secret_b);
+		let key_c = Simple::member_from_secret(&secret_c);
+		// Recognize person A and B
+		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_a)));
+		// Onboard A so that they become part of a ring.
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		// B will be part of the onboarding queue.
+		assert_ok!(PeoplePallet::recognize_personhood(person_b, Some(key_b)));
 
-// 		// Recognize person B with same key
-// 		let person_b = 2u64;
-// 		assert_ok!(PeoplePallet::recognize_personhood(person_b, Some(key_a)));
+		assert_eq!(
+			People::<Test>::get(person_a).unwrap().position,
+			RingPosition::Included { ring_index: 0, ring_position: 0 }
+		);
+		assert_eq!(
+			People::<Test>::get(person_b).unwrap().position,
+			RingPosition::Onboarding { queue_page: 0 }
+		);
 
-// 		// Recognize person A again with no key
-// 		assert_noop!(
-// 			PeoplePallet::recognize_personhood(person_a, None),
-// 			Error::<Test>::KeyAlreadyInUse
-// 		);
-// 	});
-// }
+		// Start suspensions.
+		assert_ok!(PeoplePallet::start_people_set_mutation_session());
+
+		// Suspend person A and B
+		assert_ok!(PeoplePallet::suspend_personhood(&[person_a, person_b]));
+
+		// End suspensions.
+		assert_ok!(PeoplePallet::end_people_set_mutation_session());
+		assert_ok!(PeoplePallet::remove_suspended_people(
+			RuntimeOrigin::signed(0),
+			0,
+			vec![0].try_into().unwrap()
+		));
+
+		// Make sure both A and B are suspended.
+		assert_eq!(People::<Test>::get(person_a).unwrap().position, RingPosition::Suspended);
+		assert_eq!(People::<Test>::get(person_b).unwrap().position, RingPosition::Suspended);
+
+		// Recognize person C with same key as A
+		assert_noop!(
+			PeoplePallet::recognize_personhood(person_c, Some(key_a)),
+			Error::<Test>::KeyAlreadyInUse
+		);
+
+		// Recognize person C with a different key
+		assert_ok!(PeoplePallet::recognize_personhood(person_c, Some(key_c)));
+
+		// Resume personhood for A and B.
+		assert_ok!(PeoplePallet::recognize_personhood(person_a, None));
+		assert_ok!(PeoplePallet::recognize_personhood(person_b, None));
+		// Both A and B kept their keys.
+		assert_eq!(Keys::<Test>::get(key_a), Some(person_a));
+		assert_eq!(Keys::<Test>::get(key_b), Some(person_b));
+	});
+}
 
 #[test]
 fn id_reservation_works() {
@@ -818,11 +878,11 @@ mod offchain_worker {
 			let member_keys = (0..5)
 				.map(|i| Simple::member_from_secret(&Simple::new_secret([i as u8; 32])))
 				.collect::<Vec<_>>();
-			let keys: KeysForRing<Test> = KeysForRing {
-				keys: BoundedVec::try_from(member_keys).expect("failed to init members"),
-				included: 0,
-			};
-			RingKeys::insert(0, keys.clone());
+			let keys: BoundedVec<MemberOf<Test>, <Test as Config>::MaxRingSize> =
+				BoundedVec::try_from(member_keys).expect("failed to init members");
+			let ring_status = RingStatus { total: keys.len().saturated_into(), included: 0 };
+			RingKeys::<Test>::insert(0, keys.clone());
+			RingKeysStatus::<Test>::insert(0, ring_status);
 
 			// Offchain worker should not submit the transaction
 			// if the block numbers are in between the interval so
@@ -872,33 +932,35 @@ mod offchain_worker {
 		});
 	}
 
-	#[test]
-	fn no_transaction_submitted_if_not_included_too_small() {
-		let mut ext = new_test_ext();
-		let (offchain, _state) = TestOffchainExt::new();
-		let (pool, state) = TestTransactionPoolExt::new();
-		ext.register_extension(OffchainDbExt::new(offchain.clone()));
-		ext.register_extension(OffchainWorkerExt::new(offchain));
-		ext.register_extension(TransactionPoolExt::new(pool));
+	// TODO: move to onboarding offchain worker
+	// #[test]
+	// fn no_transaction_submitted_if_not_included_too_small() {
+	// 	let mut ext = new_test_ext();
+	// 	let (offchain, _state) = TestOffchainExt::new();
+	// 	let (pool, state) = TestTransactionPoolExt::new();
+	// 	ext.register_extension(OffchainDbExt::new(offchain.clone()));
+	// 	ext.register_extension(OffchainWorkerExt::new(offchain));
+	// 	ext.register_extension(TransactionPoolExt::new(pool));
 
-		ext.execute_with(|| {
-			// Only one new member is required to build the ring
-			OnboardingSize::<Test>::set(2);
+	// 	ext.execute_with(|| {
+	// 		// Only one new member is required to build the ring
+	// 		OnboardingSize::<Test>::set(2);
 
-			// 1 member exists in the ring and is not included
-			let member_keys = vec![Simple::member_from_secret(&Simple::new_secret([0u8; 32]))];
-			let keys: KeysForRing<Test> = KeysForRing {
-				keys: BoundedVec::try_from(member_keys).expect("failed to init members"),
-				included: 0,
-			};
-			RingKeys::insert(0, keys.clone());
+	// 		// 1 member exists in the ring and is not included
+	// 		let member_keys = vec![Simple::member_from_secret(&Simple::new_secret([0u8; 32]))];
+	// 		let keys: BoundedVec<MemberOf<Test>, <Test as Config>::MaxRingSize> =
+	// 			BoundedVec::try_from(member_keys).expect("failed to init members");
+	// 		let ring_status =
+	// 			RingStatus { total: keys.len().saturated_into(), included: 0, suspended: 0 };
+	// 		RingKeys::<Test>::insert(0, keys.clone());
+	// 		RingKeysStatus::<Test>::insert(0, ring_status);
 
-			let block = 0;
-			System::set_block_number(block);
-			PeoplePallet::offchain_worker(block);
-			assert_eq!(state.read().transactions.len(), 0);
-		});
-	}
+	// 		let block = 0;
+	// 		System::set_block_number(block);
+	// 		PeoplePallet::offchain_worker(block);
+	// 		assert_eq!(state.read().transactions.len(), 0);
+	// 	});
+	// }
 }
 
 mod validate_unsigned {
@@ -915,14 +977,17 @@ mod validate_unsigned {
 			// Set-up to make the checks validating the need of ring build pass
 			OnboardingSize::<Test>::set(1);
 			let member_key = Simple::member_from_secret(&Simple::new_secret([0u8; 32]));
-			let keys: KeysForRing<Test> = KeysForRing {
-				keys: BoundedVec::try_from(vec![member_key]).expect("failed to init members"),
-				included: 0,
-			};
-			RingKeys::insert(0, keys);
+			let keys: BoundedVec<MemberOf<Test>, <Test as Config>::MaxRingSize> =
+				BoundedVec::try_from(vec![member_key]).expect("failed to init members");
+			let ring_status = RingStatus { total: keys.len().saturated_into(), included: 0 };
+			RingKeys::<Test>::insert(0, keys);
+			RingKeysStatus::<Test>::insert(0, ring_status);
 
 			// build_ring call should succeed
-			let valid_call = Call::<Test>::build_ring { ring_index: 0 };
+			let valid_call = Call::<Test>::build_ring {
+				ring_index: 0,
+				limit: Some(OnboardingSize::<Test>::get()),
+			};
 			assert_ok!(PeoplePallet::validate_unsigned(TransactionSource::Local, &valid_call),);
 
 			// Other calls should fail
@@ -946,7 +1011,10 @@ mod validate_unsigned {
 	#[test]
 	fn checks_the_need_to_build_the_ring() {
 		TestExt::new().execute_with(|| {
-			let valid_call = Call::<Test>::build_ring { ring_index: 0 };
+			let valid_call = Call::<Test>::build_ring {
+				ring_index: 0,
+				limit: Some(OnboardingSize::<Test>::get()),
+			};
 			assert_eq!(
 				PeoplePallet::validate_unsigned(TransactionSource::Local, &valid_call),
 				InvalidTransaction::Stale.into()

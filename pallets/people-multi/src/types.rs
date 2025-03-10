@@ -19,7 +19,6 @@
 
 use super::*;
 use frame_support::{pallet_prelude::*, DefaultNoBound};
-use sp_runtime::BoundedVec;
 
 pub type RevisionIndex = u32;
 pub type PageIndex = u32;
@@ -46,13 +45,39 @@ pub struct RingRoot<T: Config> {
 	PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen, DefaultNoBound,
 )]
 #[scale_info(skip_type_params(T))]
-/// This object will always place keys into keys in order, and onboard them in order.
-/// Thus `included` will keep track of a single count, which is the number of keys included.
-pub struct KeysForRing<T: Config> {
-	/// Keys in the ring.
-	pub keys: BoundedVec<MemberOf<T>, T::MaxRingSize>,
+/// Information about the current key inclusion status in a ring.
+pub struct RingStatus {
+	/// The number of keys in the ring.
+	pub total: u32,
 	/// The number of keys that have already been baked in.
 	pub included: u32,
+}
+
+/// The ring index and position in said ring they are assigned to, none if the person is waiting
+/// to be onboarded.
+#[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+pub enum RingPosition {
+	/// Coordinates within the onboarding queue for a person that doesn't belong to a ring yet.
+	Onboarding { queue_page: PageIndex },
+	/// Coordinates within the rings for a person that was registered.
+	Included { ring_index: RingIndex, ring_position: u32 },
+	/// The person is suspended and isn't part of any ring or onboarding queue page.
+	Suspended,
+}
+
+impl RingPosition {
+	/// Returns whether the person is suspended and has no position.
+	pub fn suspended(&self) -> bool {
+		matches!(self, Self::Suspended)
+	}
+
+	/// Returns the index of the ring if this person is included.
+	pub fn ring_index(&self) -> Option<RingIndex> {
+		match &self {
+			Self::Included { ring_index, .. } => Some(*ring_index),
+			_ => None,
+		}
+	}
 }
 
 /// Record of personhood.
@@ -60,10 +85,22 @@ pub struct KeysForRing<T: Config> {
 pub struct PersonRecord<Member, AccountId> {
 	// The key used for the person.
 	pub key: Member,
-	// The ring they are assigned to.
-	pub ring_index: RingIndex,
-	/// The latest root revision that this key is push into.
-	pub key_index: u32,
+	// The position identifier of the key.
+	pub position: RingPosition,
 	/// An optional privileged account that can send transaction on the behalf of the person.
 	pub account: Option<AccountId>,
+}
+
+/// Describes the action to take after checking the first two pages of the onboarding queue for a
+/// potential merge.
+#[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[scale_info(skip_type_params(T))]
+pub(crate) enum QueueMergeAction<T: Config> {
+	Merge {
+		initial_head: PageIndex,
+		new_head: PageIndex,
+		first_key_page: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize>,
+		second_key_page: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize>,
+	},
+	NoAction,
 }
