@@ -40,6 +40,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -47,6 +49,9 @@ mod tests;
 pub mod weights;
 
 extern crate alloc;
+
+pub use weights::WeightInfo;
+
 use codec::{Decode, DecodeWithMemTracking, Encode};
 use frame_support::{
 	dispatch::{DispatchInfo, PostDispatchInfo},
@@ -60,8 +65,8 @@ use pallet_transaction_payment::OnChargeTransaction;
 use scale_info::TypeInfo;
 use sp_runtime::{
 	traits::{
-		DispatchInfoOf, DispatchOriginOf, Dispatchable, Implication, PostDispatchInfoOf,
-		TransactionExtension, ValidateResult,
+		AsTransactionAuthorizedOrigin, DispatchInfoOf, DispatchOriginOf, Dispatchable, Implication,
+		PostDispatchInfoOf, TransactionExtension, ValidateResult,
 	},
 	transaction_validity::{
 		InvalidTransaction, TransactionSource, TransactionValidityError, ValidTransaction,
@@ -85,6 +90,9 @@ pub trait RestrictedEntity<OriginCaller, Balance>: Sized {
 	fn allowance(&self) -> Allowance<Balance>;
 	/// Whether the origin is restricted, and what entity it belongs to.
 	fn restricted_entity(caller: &OriginCaller) -> Option<Self>;
+
+	#[cfg(feature = "runtime-benchmarks")]
+	fn benchmarked_restricted_origin() -> OriginCaller;
 }
 
 pub use pallet::*;
@@ -93,7 +101,6 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{pallet_prelude::*, traits::ContainsPair};
 	use frame_system::pallet_prelude::*;
-	use weights::WeightInfo;
 
 	/// The usage of an entity.
 	#[derive(Encode, Decode, Clone, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -127,7 +134,10 @@ pub mod pallet {
 	pub trait Config:
 		frame_system::Config<
 			RuntimeCall: Dispatchable<Info = DispatchInfo, PostInfo = PostDispatchInfo>,
+			RuntimeOrigin: AsTransactionAuthorizedOrigin,
 		> + pallet_transaction_payment::Config
+		+ Send
+		+ Sync
 	{
 		/// The weight information for this pallet.
 		type WeightInfo: WeightInfo;
@@ -149,6 +159,9 @@ pub mod pallet {
 		///
 		/// This must be only for call which have a reasonable maximum weight and length.
 		type OperationAllowedOneTimeExcess: ContainsPair<Self::RestrictedEntity, Self::RuntimeCall>;
+
+		/// The runtime event type.
+		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 	}
 
 	#[pallet::error]
@@ -159,11 +172,18 @@ pub mod pallet {
 		NotZero,
 	}
 
+	#[pallet::event]
+	#[pallet::generate_deposit(fn deposit_event)]
+	pub enum Event<T: Config> {
+		/// Usage for an entity is cleaned.
+		UsageCleaned { entity: T::RestrictedEntity },
+	}
+
 	#[pallet::call(weight = <T as Config>::WeightInfo)]
 	impl<T: Config> Pallet<T> {
 		/// Allow to clean usage associated with an entity when it is zero or when there is no
 		/// longer any allowance for the origin.
-		// This can be task
+		// This could be an unsigned call
 		#[pallet::call_index(1)]
 		pub fn clean_usage(
 			origin: OriginFor<T>,
@@ -187,6 +207,8 @@ pub mod pallet {
 			usage.used = usage.used.saturating_sub(receive_back);
 
 			ensure!(usage.used.is_zero(), Error::<T>::NotZero);
+
+			Self::deposit_event(Event::UsageCleaned { entity });
 
 			Ok(Pays::No.into())
 		}
@@ -238,7 +260,7 @@ pub enum Pre<T: Config> {
 	},
 }
 
-impl<T: Config + Send + Sync> TransactionExtension<T::RuntimeCall> for RestrictOrigin<T> {
+impl<T: Config> TransactionExtension<T::RuntimeCall> for RestrictOrigin<T> {
 	const IDENTIFIER: &'static str = "RestrictOrigins";
 	type Implicit = ();
 	type Val = Val<T>;
@@ -249,8 +271,7 @@ impl<T: Config + Send + Sync> TransactionExtension<T::RuntimeCall> for RestrictO
 			return Weight::zero()
 		}
 
-		// TODO: Gui: weight
-		Weight::zero()
+		<T as Config>::WeightInfo::restrict_origin_tx_ext()
 	}
 
 	fn validate(

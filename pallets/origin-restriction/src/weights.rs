@@ -25,9 +25,11 @@ use frame_support::weights::Weight;
 /// Weight functions needed for pallet origins restriction.
 pub trait WeightInfo {
 	fn clean_usage() -> Weight;
+	fn restrict_origin_tx_ext() -> Weight;
 }
 
 // For tests
 impl WeightInfo for () {
 	fn clean_usage() -> Weight { Weight::zero() }
+	fn restrict_origin_tx_ext() -> Weight { Weight::zero() }
 }
