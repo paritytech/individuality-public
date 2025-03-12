@@ -23,7 +23,7 @@ use crate::{
 };
 use frame_support::{assert_noop, assert_ok, pallet_prelude::Pays};
 use individuality_support::traits::RI_ZERO;
-use sp_runtime::transaction_validity::InvalidTransaction;
+use sp_runtime::transaction_validity::{InvalidTransaction, InvalidTransaction::BadSigner};
 use verifiable::demo_impls::Simple;
 
 fn generate_people_with_index(
@@ -1021,4 +1021,124 @@ mod validate_unsigned {
 			);
 		});
 	}
+}
+
+#[test]
+fn test_revision_in_tx_ext_as_alias_account() {
+	new_test_ext().execute_with(|| {
+		// Setup
+		crate::OnboardingSize::<Test>::set(1);
+		let (_, pk, sk) = generate_people_with_index(0, 0).pop().unwrap();
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 0, None));
+		let context = [2u8; 32];
+		let alias_account = 37;
+		setup_alias_account(&pk, &sk, context, alias_account);
+
+		// Use alias account successfully
+		let call = frame_system::Call::remark { remark: vec![] };
+		assert_ok!(exec_as_alias_tx(alias_account, call));
+
+		// Revise the ring
+		crate::Root::<Test>::mutate(0, |root| {
+			root.as_mut().unwrap().revision = 1;
+		});
+
+		// Fail to alias account with outdated revision
+		let call = frame_system::Call::remark { remark: vec![] };
+		assert_noop!(exec_as_alias_tx(alias_account, call), BadSigner);
+	});
+}
+
+#[test]
+fn test_under_alias_revision_check() {
+	new_test_ext().execute_with(|| {
+		// Setup a person and its alias account
+		let (_, pk, sk) = generate_people_with_index(0, 0).pop().unwrap();
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 0, None));
+		let ring_info = Root::<Test>::get(0).expect("Ring must exist after building");
+		assert_eq!(ring_info.revision, 0);
+		let alias_account: u64 = 42;
+		let context = [2u8; 32];
+		setup_alias_account(&pk, &sk, context, alias_account);
+
+		// The account can now use `under_alias` successfully
+		let dummy_call = Box::new(RuntimeCall::from(frame_system::Call::remark { remark: vec![] }));
+		assert_ok!(PeoplePallet::under_alias(
+			RuntimeOrigin::signed(alias_account),
+			dummy_call.clone()
+		));
+
+		// Now we change the ring to revision=1, making the stored alias outdated.
+		let mut ring_info = Root::<Test>::get(0).unwrap();
+		ring_info.revision = 1;
+		Root::<Test>::insert(0, ring_info);
+
+		// Attempt `under_alias` again with the *outdated* revision=0 from storage => should fail.
+		assert_noop!(
+			PeoplePallet::under_alias(RuntimeOrigin::signed(alias_account), dummy_call),
+			sp_runtime::DispatchError::BadOrigin,
+		);
+	});
+}
+
+#[test]
+fn resetting_alias_account_for_new_revision_is_refunded() {
+	new_test_ext().execute_with(|| {
+		use crate::pallet::Origin as PeopleOrigin;
+
+		// Create a single person so that `build_ring` can work.
+		let (_, _key, _secret) = generate_people_with_index(0, 0).pop().unwrap();
+
+		// Build the ring with the single key we just inserted. This sets the ring revision to 0.
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 0, None));
+		let ring_info = Root::<Test>::get(0).expect("Ring must exist after build_ring");
+		assert_eq!(ring_info.revision, 0);
+
+		// Set an alias with revision=0 for an account for the first time.
+		// We expect `Pays::No` because no alias was previously set.
+		let account: u64 = 42;
+		let ca = ContextualAlias { alias: [1u8; 32], context: [2u8; 32] };
+		let rev_ca = RevisedContextualAlias { revision: 0, ring: 0, ca: ca.clone() };
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalAlias(rev_ca.clone()));
+		let result = PeoplePallet::set_alias_account(origin, account, 0);
+		assert_eq!(result.unwrap(), frame_support::pallet_prelude::Pays::No.into());
+
+		// Fail attempt to set the same alias again with the *same* revision=0 for the same account.
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalAlias(rev_ca.clone()));
+		assert_noop!(
+			PeoplePallet::set_alias_account(origin, account, 0),
+			Error::<Test>::AliasAccountAlreadySet
+		);
+
+		// Attempt to set the same alias again with the *same* revision=0 for a different account.
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalAlias(rev_ca.clone()));
+		let account2: u64 = 43;
+		let result = PeoplePallet::set_alias_account(origin, account2, 0);
+		assert_eq!(result.unwrap(), frame_support::pallet_prelude::Pays::Yes.into());
+
+		// Set the ring revision to 1.
+		let ring_info = Root::<Test>::get(0).unwrap();
+		Root::<Test>::insert(0, RingRoot { revision: 1, ..ring_info });
+
+		// Now set the alias account again, but *with the newer revision=1*.
+		// We expect `Pays::No` because the revision of the alias <-> Account is needed.
+		let rev_ca_new = RevisedContextualAlias { revision: 1, ring: 0, ca: ca.clone() };
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalAlias(rev_ca_new.clone()));
+		let result = PeoplePallet::set_alias_account(origin, account, 0);
+		assert_eq!(result.unwrap(), frame_support::pallet_prelude::Pays::No.into());
+
+		// Move to a different ring.
+		let ring_info = Root::<Test>::get(0).unwrap();
+		Root::<Test>::insert(1, ring_info);
+
+		// Now set the alias account again, but *with the different ring=1*.
+		// We expect `Pays::No` because the revision of the alias <-> Account is needed.
+		let rev_ca_new = RevisedContextualAlias { revision: 1, ring: 1, ca };
+		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalAlias(rev_ca_new.clone()));
+		let result = PeoplePallet::set_alias_account(origin, account, 0);
+		assert_eq!(result.unwrap(), frame_support::pallet_prelude::Pays::No.into());
+	});
 }

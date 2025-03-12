@@ -143,8 +143,14 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 				};
 				let who = who.clone();
 
-				let ca = AccountToAlias::<T>::get(&who).ok_or(InvalidTransaction::BadSigner)?;
-				let local_origin = Origin::PersonalAlias(ca);
+				let rev_ca = AccountToAlias::<T>::get(&who).ok_or(InvalidTransaction::BadSigner)?;
+				ensure!(
+					Root::<T>::get(rev_ca.ring)
+						.is_some_and(|ring| ring.revision == rev_ca.revision),
+					InvalidTransaction::BadSigner,
+				);
+
+				let local_origin = Origin::PersonalAlias(rev_ca);
 				let mut origin = origin;
 				origin.set_caller_from(local_origin);
 
@@ -172,7 +178,7 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 
 				Ok((validity, Val::UsingAccount(who, *nonce), origin))
 			},
-			Some(AsPersonInfo::AsPersonalAliasWithProof(proof, ring, context)) => {
+			Some(AsPersonInfo::AsPersonalAliasWithProof(proof, ring_index, context)) => {
 				ensure!(
 					matches!(origin.as_system_ref(), Some(frame_system::RawOrigin::None)),
 					InvalidTransaction::BadSigner
@@ -184,6 +190,7 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 					return Err(InvalidTransaction::Call.into());
 				};
 
+				let ring = Root::<T>::get(ring_index).ok_or(InvalidTransaction::Call)?;
 				let now = frame_system::Pallet::<T>::block_number();
 				if now < *call_valid_at {
 					return Err(InvalidTransaction::Future.into());
@@ -193,30 +200,31 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 					return Err(InvalidTransaction::Stale.into());
 				}
 
-				let members =
-					Root::<T>::get(ring).map(|m| m.root).ok_or(InvalidTransaction::Call)?;
-
 				let msg = inherited_implication.using_encoded(sp_io::hashing::blake2_256);
 
-				let alias = T::Crypto::validate(proof, &members, &context[..], &msg[..])
+				let alias = T::Crypto::validate(proof, &ring.root, &context[..], &msg[..])
 					.map_err(|_| InvalidTransaction::BadProof)?;
 
-				let ca = ContextualAlias { alias, context: *context };
+				let rev_ca = RevisedContextualAlias {
+					revision: ring.revision,
+					ring: *ring_index,
+					ca: ContextualAlias { alias, context: *context },
+				};
 
 				// This protects again replay attack.
-				if AliasToAccount::<T>::get(&ca)
-					.is_some_and(|stored_account| stored_account == *account)
+				if AccountToAlias::<T>::get(account)
+					.is_some_and(|stored_rev_ca| stored_rev_ca == rev_ca)
 				{
 					return Err(InvalidTransaction::Stale.into());
 				}
 
 				// The extrinsic provides the setup of the account for the alias.
-				let provides = twox_64(&("setup", &ca, &account).encode()[..]);
+				let provides = twox_64(&("setup", &rev_ca, &account).encode()[..]);
 				let valid_transaction =
 					ValidTransaction::with_tag_prefix("Ppl:Alias").and_provides(provides).into();
 
 				// We transmute the origin.
-				let local_origin = Origin::PersonalAlias(ca);
+				let local_origin = Origin::PersonalAlias(rev_ca);
 				let mut origin = origin;
 				origin.set_caller_from(local_origin);
 

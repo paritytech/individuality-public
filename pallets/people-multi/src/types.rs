@@ -30,6 +30,40 @@ pub type IntermediateOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Inte
 pub type SecretOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Secret;
 pub type SignatureOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Signature;
 
+/// A contextual alias [`ContextualAlias`] used in a specific ring revision.
+///
+/// The revision can be used to tell in the future if an alias may have been suspended.
+/// For instance, if a person is suspended, then ring will get revised, the revised alias with the
+/// old revision shows that the alias may not be owned by a valid person anymore.
+#[derive(
+	Clone,
+	PartialEq,
+	Eq,
+	RuntimeDebug,
+	Encode,
+	Decode,
+	MaxEncodedLen,
+	TypeInfo,
+	DecodeWithMemTracking,
+)]
+pub struct RevisedContextualAlias {
+	pub revision: RevisionIndex,
+	pub ring: RingIndex,
+	pub ca: ContextualAlias,
+}
+
+/// An alias [`Alias`] used in a specific ring revision.
+///
+/// The revision can be used to tell in the future if an alias may have been suspended.
+/// For instance, if a person is suspended, then ring will get revised, the revised alias with the
+/// old revision shows that the alias may not be owned by a valid person anymore.
+#[derive(Clone, PartialEq, Eq, RuntimeDebug, Encode, Decode, MaxEncodedLen, TypeInfo)]
+pub struct RevisedAlias {
+	pub revision: RevisionIndex,
+	pub ring: RingIndex,
+	pub alias: Alias,
+}
+
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(T))]
 pub struct RingRoot<T: Config> {

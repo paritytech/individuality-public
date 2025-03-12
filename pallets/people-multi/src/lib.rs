@@ -283,7 +283,7 @@ pub mod pallet {
 		_,
 		Blake2_128Concat,
 		<T as frame_system::Config>::AccountId,
-		ContextualAlias,
+		RevisedContextualAlias,
 		OptionQuery,
 	>;
 
@@ -418,6 +418,8 @@ pub mod pallet {
 		SuspensionSessionInProgress,
 		/// Call is too late or too early.
 		TimeOutOfRange,
+		/// Alias <-> Account is already set and up to date.
+		AliasAccountAlreadySet,
 		/// Personhood cannot be resumed if it is not suspended.
 		NotSuspended,
 		/// The onboarding queue pages are already defragmented and cannot be merged.
@@ -438,7 +440,7 @@ pub mod pallet {
 	)]
 	pub enum Origin {
 		PersonalIdentity(PersonalId),
-		PersonalAlias(ContextualAlias),
+		PersonalAlias(RevisedContextualAlias),
 	}
 
 	// TODO: ValidateUnsigned or SignedExtension to allow signing with our crypto.
@@ -1051,16 +1053,19 @@ pub mod pallet {
 			context: Context,
 			call: Box<<T as frame_system::Config>::RuntimeCall>,
 			proof: <T::Crypto as GenerateVerifiable>::Proof,
-			ring: RingIndex,
+			ring_index: RingIndex,
 		) -> DispatchResultWithPostInfo {
 			let _ = ensure_signed(origin.clone())?;
-			let members = Root::<T>::get(ring).ok_or(Error::<T>::NoMembers)?.root;
+			let ring = Root::<T>::get(ring_index).ok_or(Error::<T>::NoMembers)?;
 			let alias = call
-				.using_encoded(|msg| T::Crypto::validate(&proof, &members, &context, msg))
+				.using_encoded(|msg| T::Crypto::validate(&proof, &ring.root, &context, msg))
 				.map_err(|_| Error::<T>::InvalidProof)?;
-			let local_origin = Origin::PersonalAlias(ContextualAlias { alias, context });
+			let local_origin = Origin::PersonalAlias(RevisedContextualAlias {
+				revision: ring.revision,
+				ring: ring_index,
+				ca: ContextualAlias { alias, context },
+			});
 			Self::derivative_call(origin, local_origin, *call)?;
-			// TODO: This is how we handle tasks for now.
 			Ok(Pays::No.into())
 		}
 
@@ -1079,8 +1084,13 @@ pub mod pallet {
 			call: Box<<T as frame_system::Config>::RuntimeCall>,
 		) -> DispatchResultWithPostInfo {
 			let account = ensure_signed(origin.clone())?;
-			let ca = AccountToAlias::<T>::get(&account).ok_or(Error::<T>::InvalidAccount)?;
-			let local_origin = Origin::PersonalAlias(ca);
+			let rev_ca = AccountToAlias::<T>::get(&account).ok_or(Error::<T>::InvalidAccount)?;
+			ensure!(
+				Root::<T>::get(rev_ca.ring).is_some_and(|ring| ring.revision == rev_ca.revision),
+				DispatchError::BadOrigin,
+			);
+
+			let local_origin = Origin::PersonalAlias(rev_ca);
 			Self::derivative_call(origin, local_origin, *call)?;
 			// TODO: This is how we handle tasks for now.
 			Ok(Pays::No.into())
@@ -1102,28 +1112,50 @@ pub mod pallet {
 			account: T::AccountId,
 			call_valid_at: BlockNumberFor<T>,
 		) -> DispatchResultWithPostInfo {
-			let ca = Self::ensure_personal_alias(origin)?;
+			let rev_ca = Self::ensure_revised_personal_alias(origin)?;
 			let now = frame_system::Pallet::<T>::block_number();
 			let time_tolerance = Self::account_setup_time_tolerance();
 			ensure!(
 				call_valid_at <= now && now <= call_valid_at.saturating_add(time_tolerance),
 				Error::<T>::TimeOutOfRange
 			);
-			ensure!(T::AccountContexts::contains(&ca.context), Error::<T>::InvalidContext);
-			ensure!(!AccountToAlias::<T>::contains_key(&account), Error::<T>::AccountInUse);
+			ensure!(T::AccountContexts::contains(&rev_ca.ca.context), Error::<T>::InvalidContext);
 			ensure!(!AccountToPersonalId::<T>::contains_key(&account), Error::<T>::AccountInUse);
-			let pays = if let Some(old_account) = AliasToAccount::<T>::get(&ca) {
-				frame_system::Pallet::<T>::dec_sufficients(&old_account);
-				AccountToAlias::<T>::remove(&old_account);
-				Pays::Yes
-			} else {
-				Pays::No
-			};
-			frame_system::Pallet::<T>::inc_sufficients(&account);
-			AccountToAlias::<T>::insert(&account, &ca);
-			AliasToAccount::<T>::insert(&ca, &account);
 
-			Ok(pays.into())
+			let old_account = AliasToAccount::<T>::get(&rev_ca.ca);
+			let old_rev_ca = old_account.as_ref().and_then(AccountToAlias::<T>::get);
+
+			let needs_revision = old_rev_ca.is_some_and(|old_rev_ca| {
+				old_rev_ca.revision != rev_ca.revision || old_rev_ca.ring != rev_ca.ring
+			});
+
+			// Ensure it changes the account associated, or it needs revision.
+			ensure!(
+				old_account.as_ref() != Some(&account) || needs_revision,
+				Error::<T>::AliasAccountAlreadySet
+			);
+
+			// If the old account is different from the new one:
+			// * decrease the sufficients of the old account
+			// * increase the sufficients of the new account
+			// * check new account is not already in use
+			if old_account.as_ref() != Some(&account) {
+				ensure!(!AccountToAlias::<T>::contains_key(&account), Error::<T>::AccountInUse);
+				if let Some(old_account) = &old_account {
+					frame_system::Pallet::<T>::dec_sufficients(old_account);
+					AccountToAlias::<T>::remove(old_account);
+				}
+				frame_system::Pallet::<T>::inc_sufficients(&account);
+			}
+
+			AccountToAlias::<T>::insert(&account, &rev_ca);
+			AliasToAccount::<T>::insert(&rev_ca.ca, &account);
+
+			if old_account.is_none() || needs_revision {
+				Ok(Pays::No.into())
+			} else {
+				Ok(Pays::Yes.into())
+			}
 		}
 
 		#[pallet::weight(Weight::zero())]
@@ -1442,6 +1474,15 @@ pub mod pallet {
 			Ok(ensure_personal_alias(origin.into_caller())?)
 		}
 
+		/// Ensure that the origin `o` represents a person.
+		/// On success returns `Ok` with the revised alias of the person together with the context
+		/// in which it can be used and the revision of the ring the person is in.
+		pub fn ensure_revised_personal_alias(
+			origin: T::RuntimeOrigin,
+		) -> Result<RevisedContextualAlias, DispatchError> {
+			Ok(ensure_revised_personal_alias(origin.into_caller())?)
+		}
+
 		// This function always returns the ring index and the keys for the ring which is currently
 		// accepting new members.
 		pub fn available_ring() -> (RingIndex, BoundedVec<MemberOf<T>, T::MaxRingSize>) {
@@ -1689,8 +1730,9 @@ pub mod pallet {
 		}
 	}
 
-	/// Ensure that the origin `o` represents a signed extrinsic (i.e. transaction).
-	/// Returns `Ok` with the account that signed the extrinsic or an `Err` otherwise.
+	/// Ensure that the origin `o` represents an extrinsic (i.e. transaction) from a personal
+	/// identity. Returns `Ok` with the personal identity that signed the extrinsic or an `Err`
+	/// otherwise.
 	pub fn ensure_personal_identity<OuterOrigin>(o: OuterOrigin) -> Result<PersonalId, BadOrigin>
 	where
 		OuterOrigin: TryInto<Origin, Error = OuterOrigin>,
@@ -1701,14 +1743,14 @@ pub mod pallet {
 		}
 	}
 
-	/// Ensure that the origin `o` represents a signed extrinsic (i.e. transaction).
-	/// Returns `Ok` with the account that signed the extrinsic or an `Err` otherwise.
+	/// Ensure that the origin `o` represents an extrinsic (i.e. transaction) from a personal alias.
+	/// Returns `Ok` with the personal alias that signed the extrinsic or an `Err` otherwise.
 	pub fn ensure_personal_alias<OuterOrigin>(o: OuterOrigin) -> Result<ContextualAlias, BadOrigin>
 	where
 		OuterOrigin: TryInto<Origin, Error = OuterOrigin>,
 	{
 		match o.try_into() {
-			Ok(Origin::PersonalAlias(ca)) => Ok(ca),
+			Ok(Origin::PersonalAlias(rev_ca)) => Ok(rev_ca.ca),
 			_ => Err(BadOrigin),
 		}
 	}
@@ -1725,7 +1767,7 @@ pub mod pallet {
 
 		#[cfg(feature = "runtime-benchmarks")]
 		fn try_successful_origin() -> Result<OriginFor<T>, ()> {
-			todo!("account 0 that is always the first person");
+			Ok(Origin::PersonalIdentity(0).into())
 		}
 	}
 
@@ -1753,9 +1795,12 @@ pub mod pallet {
 
 		#[cfg(feature = "runtime-benchmarks")]
 		fn try_successful_origin() -> Result<OriginFor<T>, ()> {
-			// Ok(Origin::PersonalAlias(ContextualAlias { alias: [0; 32], context: [0; 32]
-			// }).into())
-			todo!("alias [0; 32] with context [0; 32]");
+			Ok(Origin::PersonalAlias(RevisedContextualAlias {
+				revision: 0,
+				ring: 0,
+				ca: ContextualAlias { alias: [0; 32], context: [0; 32] },
+			})
+			.into())
 		}
 	}
 
@@ -1786,11 +1831,101 @@ pub mod pallet {
 
 		#[cfg(feature = "runtime-benchmarks")]
 		fn try_successful_origin(context: &Context) -> Result<OriginFor<T>, ()> {
-			Ok(Origin::PersonalAlias(ContextualAlias { alias: [0; 32], context: *context }).into())
+			Ok(Origin::PersonalAlias(RevisedContextualAlias {
+				revision: 0,
+				ring: 0,
+				ca: ContextualAlias { alias: [0; 32], context: *context },
+			})
+			.into())
 		}
 	}
 
 	impl<T: Config> CountedMembers for EnsurePersonalAliasInContext<T> {
+		fn active_count() -> u32 {
+			ActiveMembers::<T>::get()
+		}
+	}
+
+	/// Ensure that the origin `o` represents an extrinsic (i.e. transaction) from a personal alias
+	/// with revision information. Returns `Ok` with the revised personal alias that signed the
+	/// extrinsic or an `Err` otherwise.
+	pub fn ensure_revised_personal_alias<OuterOrigin>(
+		o: OuterOrigin,
+	) -> Result<RevisedContextualAlias, BadOrigin>
+	where
+		OuterOrigin: TryInto<Origin, Error = OuterOrigin>,
+	{
+		match o.try_into() {
+			Ok(Origin::PersonalAlias(rev_ca)) => Ok(rev_ca),
+			_ => Err(BadOrigin),
+		}
+	}
+
+	/// Guard to ensure that the given origin is a person. The revised contextual alias of the
+	/// person is provided on success.
+	/// The revision can be used to tell in the future if an alias may have been suspended.
+	/// See [`RevisedContextualAlias`].
+	pub struct EnsureRevisedPersonalAlias<T>(PhantomData<T>);
+	impl<T: Config> EnsureOrigin<OriginFor<T>> for EnsureRevisedPersonalAlias<T> {
+		type Success = RevisedContextualAlias;
+
+		fn try_origin(o: OriginFor<T>) -> Result<Self::Success, OriginFor<T>> {
+			ensure_revised_personal_alias(o.clone().into_caller()).map_err(|_| o)
+		}
+
+		#[cfg(feature = "runtime-benchmarks")]
+		fn try_successful_origin() -> Result<OriginFor<T>, ()> {
+			Ok(Origin::PersonalAlias(RevisedContextualAlias {
+				revision: 0,
+				ring: 0,
+				ca: ContextualAlias { alias: [0; 32], context: [0; 32] },
+			})
+			.into())
+		}
+	}
+
+	frame_support::impl_ensure_origin_with_arg_ignoring_arg! {
+		impl<{ T: Config, A }>
+			EnsureOriginWithArg< OriginFor<T>, A> for EnsureRevisedPersonalAlias<T>
+		{}
+	}
+
+	impl<T: Config> CountedMembers for EnsureRevisedPersonalAlias<T> {
+		fn active_count() -> u32 {
+			ActiveMembers::<T>::get()
+		}
+	}
+
+	/// Guard to ensure that the given origin is a person. The revised alias of the person within
+	/// the context provided as an argument is returned on success.
+	/// The revision can be used to tell in the future if an alias may have been suspended.
+	/// See [`RevisedAlias`].
+	pub struct EnsureRevisedPersonalAliasInContext<T>(PhantomData<T>);
+	impl<T: Config> EnsureOriginWithArg<OriginFor<T>, Context>
+		for EnsureRevisedPersonalAliasInContext<T>
+	{
+		type Success = RevisedAlias;
+
+		fn try_origin(o: OriginFor<T>, arg: &Context) -> Result<Self::Success, OriginFor<T>> {
+			match ensure_revised_personal_alias(o.clone().into_caller()) {
+				Ok(ca) if &ca.ca.context == arg =>
+					Ok(RevisedAlias { revision: ca.revision, ring: ca.ring, alias: ca.ca.alias }),
+				_ => Err(o),
+			}
+		}
+
+		#[cfg(feature = "runtime-benchmarks")]
+		fn try_successful_origin(context: &Context) -> Result<OriginFor<T>, ()> {
+			Ok(Origin::PersonalAlias(RevisedContextualAlias {
+				revision: 0,
+				ring: 0,
+				ca: ContextualAlias { alias: [0; 32], context: *context },
+			})
+			.into())
+		}
+	}
+
+	impl<T: Config> CountedMembers for EnsureRevisedPersonalAliasInContext<T> {
 		fn active_count() -> u32 {
 			ActiveMembers::<T>::get()
 		}

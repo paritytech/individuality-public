@@ -15,8 +15,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::*;
-use frame_support::{derive_impl, dispatch::DispatchErrorWithPostInfo, storage::with_transaction};
+use crate::{
+	extension::{AsPerson, AsPersonInfo},
+	*,
+};
+use frame_support::{
+	assert_ok, derive_impl, dispatch::DispatchErrorWithPostInfo, parameter_types,
+	storage::with_transaction, traits::Equals,
+};
 use frame_system::{offchain::CreateTransactionBase, ChainContext};
 use sp_core::{ConstU16, ConstU32, ConstU64, H256};
 use sp_runtime::{
@@ -25,8 +31,10 @@ use sp_runtime::{
 	transaction_validity::{InvalidTransaction, TransactionSource, TransactionValidityError},
 	BuildStorage, DispatchError,
 };
+use verifiable::demo_impls::Simple;
 
-pub type TransactionExtension = (crate::extension::AsPerson<Test>, frame_system::CheckNonce<Test>);
+const EXTENSION_VERSION: u8 = 0;
+pub type TransactionExtension = (AsPerson<Test>, frame_system::CheckNonce<Test>);
 pub type Header = sp_runtime::generic::Header<u64, sp_runtime::traits::BlakeTwo256>;
 pub type Block = sp_runtime::generic::Block<Header, UncheckedExtrinsic>;
 pub type UncheckedExtrinsic = sp_runtime::generic::UncheckedExtrinsic<
@@ -85,11 +93,15 @@ impl CreateTransactionBase<Call<Self>> for Test {
 	type RuntimeCall = RuntimeCall;
 }
 
+parameter_types! {
+	pub const Context2: Context = [2u8; 32];
+}
+
 impl crate::Config for Test {
 	type WeightInfo = ();
 	type RuntimeEvent = RuntimeEvent;
 	type Crypto = verifiable::demo_impls::Simple;
-	type AccountContexts = ();
+	type AccountContexts = Equals<Context2>;
 	type ChunkPageSize = ConstU32<4096>;
 	type MaxRingSize = ConstU32<10>;
 	type OnboardingQueuePageSize = ConstU32<40>;
@@ -186,4 +198,49 @@ pub fn exec_tx(
 	checked.apply::<Test>(&info, len)??;
 
 	Ok(())
+}
+
+pub fn exec_as_alias_tx(
+	who: u64,
+	call: impl Into<RuntimeCall>,
+) -> Result<(), TransactionExecutionError> {
+	let nonce = frame_system::Account::<Test>::get(who).nonce;
+	let tx_ext = (
+		AsPerson::new(Some(AsPersonInfo::AsPersonalAliasWithAccount(nonce))),
+		frame_system::CheckNonce::from(nonce),
+	);
+
+	exec_tx(Some(who), tx_ext, call)
+}
+
+/// Call `set_alias_account` for the given personal id and account.
+pub fn setup_alias_account(
+	key: &<Simple as GenerateVerifiable>::Member,
+	secret: &<Simple as GenerateVerifiable>::Secret,
+	context: Context,
+	account: u64,
+) {
+	let id = crate::Keys::<Test>::get(key).expect("id not found");
+	let record = crate::People::<Test>::get(id).expect("record not found");
+	let ring_index = record.position.ring_index().expect("person not included in a ring");
+	let commitment = {
+		let all_keys = crate::RingKeys::<Test>::get(ring_index);
+		Simple::open(key, all_keys.into_iter()).unwrap()
+	};
+	let call = RuntimeCall::PeoplePallet(crate::Call::set_alias_account {
+		account,
+		call_valid_at: frame_system::Pallet::<Test>::block_number(),
+	});
+	let other_tx_ext = (frame_system::CheckNonce::<Test>::from(0),);
+	// Here we simply ignore implicit as they are null.
+	let msg = (&EXTENSION_VERSION, &call, &other_tx_ext).using_encoded(sp_io::hashing::blake2_256);
+	let (proof, _alias) =
+		Simple::create(commitment, secret, &context, &msg).expect("proof creation failed");
+	let tx_ext = (
+		AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalAliasWithProof(
+			proof, ring_index, context,
+		))),
+		other_tx_ext.0,
+	);
+	assert_ok!(exec_tx(None, tx_ext.clone(), call.clone()));
 }
