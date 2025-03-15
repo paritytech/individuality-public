@@ -94,6 +94,7 @@ impl CreateTransactionBase<Call<Self>> for Test {
 }
 
 parameter_types! {
+	pub static MaxRingSize: u32 = 10;
 	pub const Context2: Context = [2u8; 32];
 }
 
@@ -103,7 +104,7 @@ impl crate::Config for Test {
 	type Crypto = verifiable::demo_impls::Simple;
 	type AccountContexts = Equals<Context2>;
 	type ChunkPageSize = ConstU32<4096>;
-	type MaxRingSize = ConstU32<10>;
+	type MaxRingSize = MaxRingSize;
 	type OnboardingQueuePageSize = ConstU32<40>;
 	type RingBakingInterval = ConstU64<10>;
 	type QueuePageMergingInterval = ConstU64<10>;
@@ -126,6 +127,11 @@ pub fn new_config() -> ConfigRecord {
 pub struct TestExt(ConfigRecord);
 #[allow(dead_code)]
 impl TestExt {
+	pub(crate) fn max_ring_size(self, size: u32) -> Self {
+		MaxRingSize::set(size);
+		self
+	}
+
 	pub fn new() -> Self {
 		Self(new_config())
 	}
@@ -136,7 +142,10 @@ impl TestExt {
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
-	let c = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
+	let mut c = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
+	pallet::GenesisConfig::<Test> { ..Default::default() }
+		.assimilate_storage(&mut c)
+		.unwrap();
 	sp_io::TestExternalities::from(c)
 }
 

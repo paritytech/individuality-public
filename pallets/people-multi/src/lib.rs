@@ -230,7 +230,8 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type RingBuildingPeopleLimit<T: Config> = StorageValue<_, u32, OptionQuery>;
 
-	/// These are the keys that will be placed into each ring index.
+	/// Both the keys that are included in built rings
+	/// and the keys that will be used in future rings.
 	#[pallet::storage]
 	pub type RingKeys<T: Config> = StorageMap<
 		_,
@@ -256,13 +257,13 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type ActiveMembers<T: Config> = StorageValue<_, u32, ValueQuery>;
 
-	/// The current individuals we recognise in a specific ring: lookup from the crypto (public) key
-	/// into the immutable ID of the individual.
+	/// The current individuals we recognise, but not necessarily yet included in a ring.
+	/// Look-up from the crypto (public) key to the immutable ID of the individual (`PersonalId`).
 	#[pallet::storage]
 	pub type Keys<T> = CountedStorageMap<_, Blake2_128Concat, MemberOf<T>, PersonalId>;
 
-	/// The current individuals we recognise: immutable ID of the individual into various
-	/// information about their key and status.
+	/// The current individuals we recognise, but not necessarily yet included in a ring.
+	/// Immutable ID of the individual (`PersonalId`) to information about their key and status.
 	#[pallet::storage]
 	pub type People<T: Config> =
 		StorageMap<_, Blake2_128Concat, PersonalId, PersonRecord<MemberOf<T>, T::AccountId>>;
@@ -648,12 +649,17 @@ pub mod pallet {
 		pub encoded_chunks: Vec<u8>,
 		#[serde(skip)]
 		pub _phantom_data: core::marker::PhantomData<T>,
+		pub onboarding_size: u32,
 	}
 
 	impl<T: Config> Default for GenesisConfig<T> {
 		fn default() -> Self {
 			use individuality_support::genesis::{get_chunks_from_vrf_key, SMALL_VK};
-			Self { encoded_chunks: get_chunks_from_vrf_key(SMALL_VK), _phantom_data: PhantomData }
+			Self {
+				encoded_chunks: get_chunks_from_vrf_key(SMALL_VK),
+				_phantom_data: PhantomData,
+				onboarding_size: T::MaxRingSize::get(),
+			}
 		}
 	}
 
@@ -681,6 +687,8 @@ pub mod pallet {
 				page_idx += 1;
 				chunk_idx = chunk_idx_end;
 			}
+
+			OnboardingSize::<T>::set(self.onboarding_size);
 		}
 	}
 
@@ -776,6 +784,7 @@ pub mod pallet {
 			let old_head = head;
 			let mut keys_to_include: Vec<MemberOf<T>> =
 				OnboardingQueue::<T>::take(head).into_inner();
+
 			// A `head != tail` condition should mean that there is at least one key in the page
 			// following this one.
 			if keys_to_include.len() < open_slots as usize && head != tail {
@@ -831,10 +840,17 @@ pub mod pallet {
 				OnboardingQueue::<T>::insert(old_head, remaining_keys);
 				OnboardingQueue::<T>::insert(head, second_page_keys);
 				QueuePageIndices::<T>::put((old_head, tail));
-			} else {
+			} else if !remaining_keys.is_empty() {
 				let remaining_keys: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize> =
 					remaining_keys.try_into().expect("the list shrunk so it must fit; qed");
 				OnboardingQueue::<T>::insert(head, remaining_keys);
+				QueuePageIndices::<T>::put((head, tail));
+			} else {
+				// We have nothing to put back into the queue, so if this isn't the last page, move
+				// the head to the next page of the queue.
+				if head != tail {
+					head = head.checked_add(1).unwrap_or(0);
+				}
 				QueuePageIndices::<T>::put((head, tail));
 			}
 

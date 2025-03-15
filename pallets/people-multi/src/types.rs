@@ -87,8 +87,10 @@ pub struct RingStatus {
 	pub included: u32,
 }
 
-/// The ring index and position in said ring they are assigned to, none if the person is waiting
-/// to be onboarded.
+/// Differentiates between individuals included in a ring,
+/// those being onboarded and the suspended ones.
+/// For those already included, provides ring index and position in it.
+/// For those being onboarded, provides queue page index and position in the queue.
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum RingPosition {
 	/// Coordinates within the onboarding queue for a person that doesn't belong to a ring yet.
