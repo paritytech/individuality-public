@@ -47,17 +47,133 @@ use core::marker::PhantomData;
 pub trait WeightInfo {
 	fn as_personal_identity() -> Weight;
 	fn as_personal_alias() -> Weight;
+	fn under_alias() -> Weight;
+	fn set_alias_account() -> Weight;
+	fn unset_alias_account() -> Weight;
+	fn reset_root() -> Weight;
+	fn force_recognize_personhood() -> Weight;
+	fn set_personal_id_account() -> Weight;
+	fn unset_personal_id_account() -> Weight;
+	fn set_onboarding_size() -> Weight;
+	fn merge_rings() -> Weight;
+	fn validate_unsigned_with_build_ring(n: u32) -> Weight;
+	fn validate_unsigned_with_onboard_people() -> Weight;
+	fn validate_unsigned_with_remove_suspended_people(n: u32) -> Weight;
+	fn validate_unsigned_with_merge_queue_pages() -> Weight;
 }
 
-/// Weights for pallet_ranked_collective using the Substrate node and recommended hardware.
 pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	fn as_personal_identity() -> Weight { Weight::zero() }
 	fn as_personal_alias() -> Weight { Weight::zero() }
+
+	fn under_alias() -> Weight {
+		Weight::zero()
+	}
+
+	fn set_alias_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn unset_alias_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn reset_root() -> Weight {
+		Weight::zero()
+	}
+
+	fn force_recognize_personhood() -> Weight {
+		Weight::zero()
+	}
+
+	fn set_personal_id_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn unset_personal_id_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn set_onboarding_size() -> Weight {
+		Weight::zero()
+	}
+
+	fn merge_rings() -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_build_ring(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_onboard_people() -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_remove_suspended_people(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_merge_queue_pages() -> Weight {
+		Weight::zero()
+	}
 }
 
 // For backwards compatibility and tests
 impl WeightInfo for () {
 	fn as_personal_identity() -> Weight { Weight::zero() }
 	fn as_personal_alias() -> Weight { Weight::zero() }
+
+	fn under_alias() -> Weight {
+		Weight::zero()
+	}
+
+	fn set_alias_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn unset_alias_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn reset_root() -> Weight {
+		Weight::zero()
+	}
+
+	fn force_recognize_personhood() -> Weight {
+		Weight::zero()
+	}
+
+	fn set_personal_id_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn unset_personal_id_account() -> Weight {
+		Weight::zero()
+	}
+
+	fn set_onboarding_size() -> Weight {
+		Weight::zero()
+	}
+
+	fn merge_rings() -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_build_ring(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_onboard_people() -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_remove_suspended_people(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn validate_unsigned_with_merge_queue_pages() -> Weight {
+		Weight::zero()
+	}
 }

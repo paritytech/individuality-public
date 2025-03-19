@@ -20,9 +20,13 @@ use crate::{
 	*,
 };
 use frame_support::{
-	assert_ok, derive_impl, dispatch::DispatchErrorWithPostInfo, parameter_types,
-	storage::with_transaction, traits::Equals,
+	assert_ok, derive_impl, dispatch::DispatchErrorWithPostInfo, match_types, parameter_types,
+	storage::with_transaction,
 };
+
+#[cfg(feature = "runtime-benchmarks")]
+use crate::benchmarking::ContextToUseInPeopleBenchmarks;
+
 use frame_system::{offchain::CreateTransactionBase, ChainContext};
 use sp_core::{ConstU16, ConstU32, ConstU64, H256};
 use sp_runtime::{
@@ -95,20 +99,33 @@ impl CreateTransactionBase<Call<Self>> for Test {
 
 parameter_types! {
 	pub static MaxRingSize: u32 = 10;
-	pub const Context2: Context = [2u8; 32];
+}
+
+pub const MOCK_CONTEXT: Context = *b"pop:polkadot.network/mock       ";
+match_types! {
+	pub type TestAccountContexts: impl Contains<Context> = {
+		&MOCK_CONTEXT
+	};
 }
 
 impl crate::Config for Test {
 	type WeightInfo = ();
 	type RuntimeEvent = RuntimeEvent;
 	type Crypto = verifiable::demo_impls::Simple;
-	type AccountContexts = Equals<Context2>;
+	type AccountContexts = TestAccountContexts;
 	type ChunkPageSize = ConstU32<4096>;
 	type MaxRingSize = MaxRingSize;
 	type OnboardingQueuePageSize = ConstU32<40>;
 	type RingBakingInterval = ConstU64<10>;
 	type QueuePageMergingInterval = ConstU64<10>;
 	type MaxTaskLifespan = ConstU64<5>;
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl ContextToUseInPeopleBenchmarks for Test {
+	fn valid_account_context() -> Context {
+		MOCK_CONTEXT
+	}
 }
 
 #[allow(dead_code)]

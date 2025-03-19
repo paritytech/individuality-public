@@ -102,11 +102,10 @@ mod mock;
 mod tests;
 
 #[cfg(feature = "runtime-benchmarks")]
-mod benchmarking;
+pub mod benchmarking;
 pub mod extension;
 pub mod types;
 pub mod weights;
-
 pub use pallet::*;
 pub use types::*;
 pub use weights::WeightInfo;
@@ -574,14 +573,13 @@ pub mod pallet {
 					let onboarding_size = OnboardingSize::<T>::get();
 					let (mut head, tail) = QueuePageIndices::<T>::get();
 					let mut keys_to_include: u32 =
-						OnboardingQueue::<T>::take(head).len().saturated_into();
+						OnboardingQueue::<T>::get(head).len().saturated_into();
 					// A `head != tail` condition should mean that there is at least one key in the
 					// page following this one.
 					if keys_to_include < open_slots && head != tail {
 						head = head.checked_add(1).unwrap_or(0);
-						keys_to_include = keys_to_include.saturating_add(
-							OnboardingQueue::<T>::take(head).len().saturated_into(),
-						);
+						keys_to_include = keys_to_include
+							.saturating_add(OnboardingQueue::<T>::get(head).len().saturated_into());
 					}
 					// Make sure the ring requires baking
 					if Self::should_onboard_people(
@@ -692,12 +690,12 @@ pub mod pallet {
 		}
 	}
 
-	#[pallet::call]
+	#[pallet::call(weight = <T as Config>::WeightInfo)]
 	impl<T: Config> Pallet<T> {
 		/// Build a ring root by including registered people.
 		///
 		/// This is a task!!
-		#[pallet::weight(Weight::zero())]
+		#[pallet::weight(T::WeightInfo::validate_unsigned_with_build_ring(limit.unwrap_or_else(T::MaxRingSize::get)))]
 		#[pallet::call_index(100)]
 		pub fn build_ring(
 			origin: OriginFor<T>,
@@ -764,7 +762,7 @@ pub mod pallet {
 		/// `build_ring`.
 		///
 		/// This is a task!!
-		#[pallet::weight(Weight::zero())]
+		#[pallet::weight(T::WeightInfo::validate_unsigned_with_onboard_people())]
 		#[pallet::call_index(105)]
 		pub fn onboard_people(origin: OriginFor<T>) -> DispatchResult {
 			ensure_none(origin)?;
@@ -860,7 +858,6 @@ pub mod pallet {
 		/// Task that merges two rings. In order for the rings to be eligible for merging, they must
 		/// be below 1/2 of max capacity, have no pending suspensions and not be the top ring used
 		/// for onboarding.
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(110)]
 		pub fn merge_rings(
 			_origin: OriginFor<T>,
@@ -937,7 +934,7 @@ pub mod pallet {
 		/// be exhaustive, as one call to this function should remove all suspended people. In
 		/// practice, this should be feasible as ring sizes are still small and there isn't a lot of
 		/// computation happening per removed person.
-		#[pallet::weight(Weight::zero())]
+		#[pallet::weight(T::WeightInfo::validate_unsigned_with_remove_suspended_people(suspended_indices.len() as u32))]
 		#[pallet::call_index(111)]
 		pub fn remove_suspended_people(
 			origin: OriginFor<T>,
@@ -1001,7 +998,7 @@ pub mod pallet {
 		/// `T::QueuePageMergingInterval` blocks, this can also be done through an unsigned call.
 		///
 		/// This is a task!!
-		#[pallet::weight(Weight::zero())]
+		#[pallet::weight(T::WeightInfo::validate_unsigned_with_merge_queue_pages())]
 		#[pallet::call_index(106)]
 		pub fn merge_queue_pages(origin: OriginFor<T>) -> DispatchResult {
 			ensure_none(origin)?;
@@ -1039,8 +1036,8 @@ pub mod pallet {
 		// NOTE: This might be removed in the future. Use the `AsPerson` transaction
 		// extension to dispatch call with signature instead.
 		// TODO: weight here is a bit complicated. see `pallet_utility::as_derivative` for hints.
-		#[pallet::weight(T::WeightInfo::as_personal_identity())]
 		#[pallet::call_index(1)]
+		#[pallet::weight(T::WeightInfo::as_personal_identity().saturating_add(call.get_dispatch_info().call_weight))]
 		pub fn as_personal_identity(
 			origin: OriginFor<T>,
 			index: PersonalId,
@@ -1062,8 +1059,8 @@ pub mod pallet {
 		/// Generally this should not be used since it does not protect against replay attacks. If
 		/// used then it is important to use mortal transactions with a short lifespan.
 		// TODO: weight here is a bit complicated. see `pallet_utility::as_derivative` for hints.
-		#[pallet::weight(T::WeightInfo::as_personal_alias())]
 		#[pallet::call_index(2)]
+		#[pallet::weight(T::WeightInfo::as_personal_alias().saturating_add(call.get_dispatch_info().call_weight))]
 		pub fn as_personal_alias(
 			origin: OriginFor<T>,
 			context: Context,
@@ -1093,8 +1090,8 @@ pub mod pallet {
 		// Note this is not feeless even if the `call` is feeless. This is because we cannot
 		// easily fetch the feelessness of `call` from within our feeless condition.
 		// TODO: weight here is a bit complicated. see `pallet_utility::as_derivative` for hints.
-		#[pallet::weight(T::WeightInfo::as_personal_alias())]
 		#[pallet::call_index(3)]
+		#[pallet::weight(T::WeightInfo::under_alias().saturating_add(call.get_dispatch_info().call_weight))]
 		pub fn under_alias(
 			origin: OriginFor<T>,
 			call: Box<<T as frame_system::Config>::RuntimeCall>,
@@ -1121,7 +1118,6 @@ pub mod pallet {
 		/// Parameters:
 		/// - `account`: The account to set the alias for.
 		/// - `call_valid_at`: The block number when the call becomes valid.
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(4)]
 		pub fn set_alias_account(
 			origin: OriginFor<T>,
@@ -1174,7 +1170,6 @@ pub mod pallet {
 			}
 		}
 
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(5)]
 		pub fn unset_alias_account(origin: OriginFor<T>) -> DispatchResult {
 			let alias = Self::ensure_personal_alias(origin)?;
@@ -1185,7 +1180,6 @@ pub mod pallet {
 			Ok(())
 		}
 
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(6)]
 		pub fn reset_root(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
@@ -1198,7 +1192,6 @@ pub mod pallet {
 			Ok(Pays::No.into())
 		}
 
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(7)]
 		pub fn force_recognize_personhood(
 			origin: OriginFor<T>,
@@ -1227,7 +1220,6 @@ pub mod pallet {
 		/// Parameters:
 		/// - `account`: The account to set the alias for.
 		/// - `call_valid_at`: The block number when the call becomes valid.
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(8)]
 		pub fn set_personal_id_account(
 			origin: OriginFor<T>,
@@ -1260,7 +1252,6 @@ pub mod pallet {
 		}
 
 		/// Unset the personal id account.
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(9)]
 		pub fn unset_personal_id_account(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
 			let id = Self::ensure_personal_identity(origin)?;
@@ -1273,7 +1264,6 @@ pub mod pallet {
 			Ok(Pays::Yes.into())
 		}
 
-		#[pallet::weight(Weight::zero())]
 		#[pallet::call_index(50)]
 		pub fn set_onboarding_size(
 			origin: OriginFor<T>,

@@ -2443,9 +2443,8 @@ fn test_revision_in_tx_ext_as_alias_account() {
 		let (_, pk, sk) = generate_people_with_index(0, 0).pop().unwrap();
 		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
 		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 0, None));
-		let context = [2u8; 32];
 		let alias_account = 37;
-		setup_alias_account(&pk, &sk, context, alias_account);
+		setup_alias_account(&pk, &sk, MOCK_CONTEXT, alias_account);
 
 		// Use alias account successfully
 		let call = frame_system::Call::remark { remark: vec![] };
@@ -2474,8 +2473,7 @@ fn test_under_alias_revision_check() {
 		let ring_info = Root::<Test>::get(0).expect("Ring must exist after building");
 		assert_eq!(ring_info.revision, 0);
 		let alias_account: u64 = 42;
-		let context = [2u8; 32];
-		setup_alias_account(&pk, &sk, context, alias_account);
+		setup_alias_account(&pk, &sk, MOCK_CONTEXT, alias_account);
 
 		// The account can now use `under_alias` successfully
 		let dummy_call = Box::new(RuntimeCall::from(frame_system::Call::remark { remark: vec![] }));
@@ -2515,7 +2513,7 @@ fn resetting_alias_account_for_new_revision_is_refunded() {
 		// Set an alias with revision=0 for an account for the first time.
 		// We expect `Pays::No` because no alias was previously set.
 		let account: u64 = 42;
-		let ca = ContextualAlias { alias: [1u8; 32], context: [2u8; 32] };
+		let ca = ContextualAlias { alias: [1u8; 32], context: MOCK_CONTEXT };
 		let rev_ca = RevisedContextualAlias { revision: 0, ring: 0, ca: ca.clone() };
 		let origin = RuntimeOrigin::from(PeopleOrigin::PersonalAlias(rev_ca.clone()));
 		let result = PeoplePallet::set_alias_account(origin, account, 0);
