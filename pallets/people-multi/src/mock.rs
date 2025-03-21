@@ -113,7 +113,7 @@ impl crate::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type Crypto = verifiable::demo_impls::Simple;
 	type AccountContexts = TestAccountContexts;
-	type ChunkPageSize = ConstU32<4096>;
+	type ChunkPageSize = ConstU32<5>;
 	type MaxRingSize = MaxRingSize;
 	type OnboardingQueuePageSize = ConstU32<40>;
 	type RingBakingInterval = ConstU64<10>;
@@ -159,11 +159,20 @@ impl TestExt {
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
-	let mut c = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
-	pallet::GenesisConfig::<Test> { ..Default::default() }
-		.assimilate_storage(&mut c)
-		.unwrap();
-	sp_io::TestExternalities::from(c)
+	let chunks: Vec<<verifiable::demo_impls::Simple as GenerateVerifiable>::StaticChunk> =
+		[(); 512].to_vec();
+	let encoded_chunks = chunks.encode();
+
+	RuntimeGenesisConfig {
+		system: Default::default(),
+		people_pallet: crate::GenesisConfig::<Test> {
+			encoded_chunks: encoded_chunks.clone(),
+			..Default::default()
+		},
+	}
+	.build_storage()
+	.unwrap()
+	.into()
 }
 
 /// We gather both error into a single type in order to do `assert_ok` and `assert_err` safely.

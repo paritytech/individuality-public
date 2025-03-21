@@ -56,6 +56,8 @@ pub trait WeightInfo {
 	fn unset_personal_id_account() -> Weight;
 	fn set_onboarding_size() -> Weight;
 	fn merge_rings() -> Weight;
+	fn migrate_included_key() -> Weight;
+	fn migrate_onboarding_key() -> Weight;
 	fn validate_unsigned_with_build_ring(n: u32) -> Weight;
 	fn validate_unsigned_with_onboard_people() -> Weight;
 	fn validate_unsigned_with_remove_suspended_people(n: u32) -> Weight;
@@ -100,6 +102,14 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	}
 
 	fn merge_rings() -> Weight {
+		Weight::zero()
+	}
+
+	fn migrate_included_key() -> Weight {
+		Weight::zero()
+	}
+
+	fn migrate_onboarding_key() -> Weight {
 		Weight::zero()
 	}
 
@@ -158,6 +168,14 @@ impl WeightInfo for () {
 	}
 
 	fn merge_rings() -> Weight {
+		Weight::zero()
+	}
+
+	fn migrate_included_key() -> Weight {
+		Weight::zero()
+	}
+
+	fn migrate_onboarding_key() -> Weight {
 		Weight::zero()
 	}
 

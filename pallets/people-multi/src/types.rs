@@ -17,6 +17,8 @@
 
 //! Types for Proof-of-Personhood system.
 
+#![allow(clippy::result_unit_err)]
+
 use super::*;
 use frame_support::{pallet_prelude::*, DefaultNoBound};
 
@@ -29,6 +31,91 @@ pub type MembersOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Members;
 pub type IntermediateOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Intermediate;
 pub type SecretOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Secret;
 pub type SignatureOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Signature;
+pub type ChunksOf<T> = BoundedVec<
+	<<T as Config>::Crypto as GenerateVerifiable>::StaticChunk,
+	<T as Config>::ChunkPageSize,
+>;
+
+/// The overarching state of all people rings regarding the actions that are currently allowed to be
+/// performed on them.
+#[derive(
+	Clone,
+	PartialEq,
+	Eq,
+	RuntimeDebug,
+	Encode,
+	Decode,
+	MaxEncodedLen,
+	TypeInfo,
+	DecodeWithMemTracking,
+)]
+pub enum RingMembersState {
+	/// The rings can accept new people sequentially if the maximum capacity has not been reached
+	/// yet. Ring building is permitted in this state by building the ring roots on top of
+	/// previously computed roots. In case a ring suffered mutations that invalidated a previous
+	/// ring root through the removal of an included member, the existing ring root will be removed
+	/// and ring building will start from scratch.
+	AppendOnly,
+	/// A semaphore counting the number of entities making changes to the ring members list which
+	/// require the entire ring to be rebuilt. Whenever a DIM would want to suspend
+	/// people, it would first need to increment this counter and then start submitting the
+	/// suspended indices. After all indices are registered, the counter is decremented. Ring
+	/// merges are allowed only when no entity is allowed to suspend keys and the counter is 0.
+	Mutating(u8),
+	/// After mutations to the member set, any pending key migrations are enacted before the new
+	/// ring roots will be built in order to reflect the latest changes in state.
+	KeyMigration,
+}
+
+impl Default for RingMembersState {
+	fn default() -> Self {
+		Self::AppendOnly
+	}
+}
+
+impl RingMembersState {
+	/// Returns whether the state allows only incremental additions to rings and their roots.
+	pub fn append_only(&self) -> bool {
+		matches!(self, Self::AppendOnly)
+	}
+
+	/// Returns whether the state allows mutating the member set of rings.
+	pub fn mutating(&self) -> bool {
+		matches!(self, Self::Mutating(_))
+	}
+
+	/// Returns whether the state allows the pending key migrations to be enacted.
+	pub fn key_migration(&self) -> bool {
+		matches!(self, Self::KeyMigration)
+	}
+
+	/// Move to a mutation state.
+	pub fn start_mutation_session(self) -> Result<Self, ()> {
+		match self {
+			Self::AppendOnly => Ok(Self::Mutating(1)),
+			Self::Mutating(n) => Ok(Self::Mutating(n.checked_add(1).ok_or(())?)),
+			Self::KeyMigration => Err(()),
+		}
+	}
+
+	/// Move out of a mutation state.
+	pub fn end_mutation_session(self) -> Result<Self, ()> {
+		match self {
+			Self::AppendOnly => Err(()),
+			Self::Mutating(1) => Ok(Self::KeyMigration),
+			Self::Mutating(n) => Ok(Self::Mutating(n.saturating_sub(1))),
+			Self::KeyMigration => Err(()),
+		}
+	}
+
+	/// Move out of a key migration state.
+	pub fn end_key_migration(self) -> Result<Self, ()> {
+		match self {
+			Self::KeyMigration => Ok(Self::AppendOnly),
+			_ => Err(()),
+		}
+	}
+}
 
 /// A contextual alias [`ContextualAlias`] used in a specific ring revision.
 ///
@@ -87,16 +174,17 @@ pub struct RingStatus {
 	pub included: u32,
 }
 
-/// Differentiates between individuals included in a ring,
-/// those being onboarded and the suspended ones.
-/// For those already included, provides ring index and position in it.
-/// For those being onboarded, provides queue page index and position in the queue.
+/// The state of a person's key within the pallet along with its position in relevant structures.
+///
+/// Differentiates between individuals included in a ring, those being onboarded and the suspended
+/// ones. For those already included, provides ring index and position in it. For those being
+/// onboarded, provides queue page index and position in the queue.
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum RingPosition {
 	/// Coordinates within the onboarding queue for a person that doesn't belong to a ring yet.
 	Onboarding { queue_page: PageIndex },
 	/// Coordinates within the rings for a person that was registered.
-	Included { ring_index: RingIndex, ring_position: u32 },
+	Included { ring_index: RingIndex, ring_position: u32, scheduled_for_removal: bool },
 	/// The person is suspended and isn't part of any ring or onboarding queue page.
 	Suspended,
 }
@@ -105,6 +193,14 @@ impl RingPosition {
 	/// Returns whether the person is suspended and has no position.
 	pub fn suspended(&self) -> bool {
 		matches!(self, Self::Suspended)
+	}
+
+	/// Returns whether the person is included in a ring and is scheduled for removal.
+	pub fn scheduled_for_removal(&self) -> bool {
+		match &self {
+			Self::Included { scheduled_for_removal, .. } => *scheduled_for_removal,
+			_ => false,
+		}
 	}
 
 	/// Returns the index of the ring if this person is included.

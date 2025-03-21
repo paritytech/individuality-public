@@ -22,7 +22,7 @@ use frame_benchmarking::{account, v2::*, BenchmarkError};
 use frame_support::{assert_ok, pallet_prelude::Get};
 use frame_system::RawOrigin as SystemOrigin;
 use individuality_support::traits::RI_ZERO;
-use sp_runtime::{traits::AppendZerosInput, BoundedVec};
+use sp_runtime::traits::AppendZerosInput;
 
 const SEED: u32 = 0;
 
@@ -377,19 +377,10 @@ mod benches {
 			.collect();
 		assert_ok!(pallet::Pallet::<T>::suspend_personhood(&suspensions));
 		assert_ok!(pallet::Pallet::<T>::end_people_set_mutation_session());
+		assert_ok!(pallet::Pallet::<T>::migrate_keys(SystemOrigin::None.into(), None));
 
-		let suspended_indices: BoundedVec<u32, _> =
-			(1..ring_size / 2 + 2).collect::<Vec<_>>().try_into().unwrap();
-		assert_ok!(pallet::Pallet::<T>::remove_suspended_people(
-			SystemOrigin::None.into(),
-			RI_ZERO,
-			suspended_indices.clone()
-		));
-		assert_ok!(pallet::Pallet::<T>::remove_suspended_people(
-			SystemOrigin::None.into(),
-			1,
-			suspended_indices
-		));
+		assert_ok!(pallet::Pallet::<T>::remove_suspended_keys(SystemOrigin::None.into(), RI_ZERO));
+		assert_ok!(pallet::Pallet::<T>::remove_suspended_keys(SystemOrigin::None.into(), 1));
 
 		// The current ring has to have a higher index than the ones being merged
 		CurrentRingIndex::<T>::set(14);
@@ -401,6 +392,53 @@ mod benches {
 		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO).total, 8);
 		assert!(Root::<T>::get(RI_ZERO).is_some());
 		assert!(Root::<T>::get(1).is_none());
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn migrate_included_key() -> Result<(), BenchmarkError> {
+		// Generate people and build a ring
+		let members = generate_members_for_ring::<T>(SEED);
+		recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people(SystemOrigin::None.into()));
+		assert_ok!(pallet::Pallet::<T>::build_ring(SystemOrigin::None.into(), RI_ZERO, None));
+
+		let temp_key = new_member_from::<T>(u32::MAX, SEED).1;
+		KeyMigrationQueue::<T>::insert(0, temp_key);
+
+		let new_key = new_member_from::<T>(u32::MAX - 1, SEED).1;
+
+		#[extrinsic_call]
+		_(Origin::PersonalIdentity(0u64), new_key.clone());
+
+		// Pending suspensions are reflected in the ring status.
+		assert_eq!(KeyMigrationQueue::<T>::get(0), Some(new_key));
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn migrate_onboarding_key() -> Result<(), BenchmarkError> {
+		// Generate people and build a ring
+		let members = generate_members_for_ring::<T>(SEED);
+		recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people(SystemOrigin::None.into()));
+		assert_ok!(pallet::Pallet::<T>::build_ring(SystemOrigin::None.into(), RI_ZERO, None));
+
+		let temp_key = new_member_from::<T>(u32::MAX, SEED).1;
+
+		let new_person = pallet::Pallet::<T>::reserve_new_id();
+		pallet::Pallet::<T>::recognize_personhood(new_person, Some(temp_key.clone())).unwrap();
+
+		let new_key = new_member_from::<T>(u32::MAX - 1, SEED).1;
+
+		#[extrinsic_call]
+		_(Origin::PersonalIdentity(new_person), new_key.clone());
+
+		// Pending suspensions are reflected in the ring status.
+		assert!(KeyMigrationQueue::<T>::iter().next().is_none());
+		assert_eq!(OnboardingQueue::<T>::get(0)[0], new_key);
 
 		Ok(())
 	}
@@ -494,7 +532,7 @@ mod benches {
 	}
 
 	#[benchmark]
-	fn validate_unsigned_with_remove_suspended_people(
+	fn validate_unsigned_with_remove_suspended_keys(
 		n: Linear<1, { T::MaxRingSize::get() }>,
 	) -> Result<(), BenchmarkError> {
 		// Generate people and build a ring
@@ -511,16 +549,14 @@ mod benches {
 		let suspensions: Vec<PersonalId> = (0..n as PersonalId).collect();
 		assert_ok!(pallet::Pallet::<T>::suspend_personhood(&suspensions));
 		assert_ok!(pallet::Pallet::<T>::end_people_set_mutation_session());
+		assert_ok!(pallet::Pallet::<T>::migrate_keys(SystemOrigin::None.into(), None));
 
 		// To make sure they are indeed pending suspension
-		assert_eq!(PendingSuspensions::<T>::get(RI_ZERO), n as u32);
-
-		let suspended_indices: BoundedVec<u32, _> =
-			(0..n as u32).collect::<Vec<_>>().try_into().unwrap();
+		assert_eq!(PendingSuspensions::<T>::get(RI_ZERO).len(), n as usize);
 
 		#[block]
 		{
-			let call = Call::remove_suspended_people { ring_index: RI_ZERO, suspended_indices };
+			let call = Call::remove_suspended_keys { ring_index: RI_ZERO };
 			<pallet::Pallet<T> as ValidateUnsigned>::validate_unsigned(
 				TransactionSource::Local,
 				&call,
@@ -530,7 +566,7 @@ mod benches {
 		}
 
 		// Pending suspensions are cleared for the ring
-		assert_eq!(PendingSuspensions::<T>::get(RI_ZERO), 0);
+		assert!(PendingSuspensions::<T>::get(RI_ZERO).is_empty());
 
 		// Ring data becomes modified
 		let ring_size: u32 = <T as Config>::MaxRingSize::get();
@@ -540,6 +576,48 @@ mod benches {
 		);
 		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), (ring_size - n as u32) as usize);
 		assert_ne!(Root::<T>::get(RI_ZERO).unwrap().intermediate, initial_root.intermediate);
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn validate_unsigned_with_migrate_keys(
+		n: Linear<1, { T::MaxRingSize::get() }>,
+	) -> Result<(), BenchmarkError> {
+		// Generate people and build a ring
+		let members = generate_members_for_ring::<T>(SEED);
+		recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people(SystemOrigin::None.into()));
+		assert_ok!(pallet::Pallet::<T>::build_ring(SystemOrigin::None.into(), RI_ZERO, None));
+
+		// Migrate 'n' number of people in the ring
+		for (personal_id, key) in (0..n as PersonalId)
+			.map(|i| new_member_from::<T>(u32::MAX - i as u32, SEED).1)
+			.enumerate()
+		{
+			assert_ok!(pallet::Pallet::<T>::migrate_included_key(
+				Origin::PersonalIdentity(personal_id as PersonalId).into(),
+				key
+			));
+		}
+		assert_ok!(pallet::Pallet::<T>::start_people_set_mutation_session());
+		assert_ok!(pallet::Pallet::<T>::end_people_set_mutation_session());
+		assert!(PendingSuspensions::<T>::get(RI_ZERO).is_empty());
+
+		#[block]
+		{
+			let call = Call::migrate_keys { limit: Some(n) };
+			<pallet::Pallet<T> as ValidateUnsigned>::validate_unsigned(
+				TransactionSource::Local,
+				&call,
+			)
+			.map_err(|e| -> &'static str { e.into() })?;
+			call.dispatch_bypass_filter(RawOrigin::None.into())?;
+		}
+
+		// Pending suspensions are reflected in the ring status.
+		assert_eq!(PendingSuspensions::<T>::get(RI_ZERO).len(), n as usize);
+		assert!(KeyMigrationQueue::<T>::iter().next().is_none());
 
 		Ok(())
 	}
