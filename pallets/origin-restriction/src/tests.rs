@@ -168,5 +168,86 @@ fn one_time_excess_requires_usage_zero() {
 	});
 }
 
-// TODO: Gui: a test to assert the behavior of the extension when disabled.
-// TODO: Gui: a test for `clean_usage` call.
+#[test]
+fn clean_usage_works() {
+	new_test_ext().execute_with(|| {
+		// Move beyond block 0 for clarity in block numbering.
+		advance_by(1);
+
+		// 1) Attempt to clean usage with no recorded usage => should fail with NoUsage.
+		assert_noop!(
+			OriginsRestriction::clean_usage(
+				frame_system::RawOrigin::Root.into(),
+				RuntimeRestrictedEntity::A
+			),
+			Error::<Test>::NoUsage
+		);
+
+		// Create some usage for RESTRICTED_ORIGIN_1 (which maps to RuntimeRestrictedEntity::A).
+		assert_ok!(exec_signed_tx(RESTRICTED_ORIGIN_1, MockPalletCall::do_something {}));
+		let usage = Usages::<Test>::get(RuntimeRestrictedEntity::A).expect("Usage must be present");
+		assert!(usage.used > 0, "Usage should have increased after the call");
+
+		// 2) Try cleaning while usage is non-zero => should fail with NotZero.
+		assert_noop!(
+			OriginsRestriction::clean_usage(
+				frame_system::RawOrigin::Root.into(),
+				RuntimeRestrictedEntity::A
+			),
+			Error::<Test>::NotZero
+		);
+
+		// Figure out how many blocks to advance so that usage recovers fully back to zero.
+		// The usage recovers ALLOWANCE_RECOVERY_PER_BLOCK every block, so compute the needed
+		// blocks.
+		let used_amount = usage.used;
+		let blocks_needed = used_amount.div_ceil(ALLOWANCE_RECOVERY_PER_BLOCK); // Ceiling division
+
+		advance_by(blocks_needed);
+
+		// 3) Now that enough blocks have passed, usage should be zero => clean_usage should
+		//    succeed.
+		assert_ok!(OriginsRestriction::clean_usage(
+			frame_system::RawOrigin::Root.into(),
+			RuntimeRestrictedEntity::A
+		));
+
+		// We expect the storage to be removed and the UsageCleaned event to be emitted.
+		assert!(Usages::<Test>::get(RuntimeRestrictedEntity::A).is_none());
+		System::assert_last_event(RuntimeEvent::OriginsRestriction(Event::UsageCleaned {
+			entity: RuntimeRestrictedEntity::A,
+		}));
+
+		// 4) Calling again when there is no usage => fail with NoUsage.
+		assert_noop!(
+			OriginsRestriction::clean_usage(
+				frame_system::RawOrigin::Root.into(),
+				RuntimeRestrictedEntity::A
+			),
+			Error::<Test>::NoUsage
+		);
+	});
+}
+
+#[test]
+fn restrict_origin_extension_disabled_behavior() {
+	new_test_ext().execute_with(|| {
+		// Move to a non-zero block number for clarity.
+		advance_by(1);
+
+		// 1) Attempt from restricted origin => Expect InvalidTransaction::Call
+		// because the pallet explicitly forbids restricted origins if the extension is off.
+		assert_noop!(
+			exec_signed_tx_disabled(RESTRICTED_ORIGIN_1, MockPalletCall::do_something {}),
+			sp_runtime::transaction_validity::InvalidTransaction::Call
+		);
+
+		// 2) Attempt from non-restricted origin => Should succeed and also
+		// should not track any usage since usage is only tracked for restricted origins.
+		assert_ok!(exec_signed_tx_disabled(NON_RESTRICTED_ORIGIN, MockPalletCall::do_something {}));
+		assert!(
+			Usages::<Test>::iter().next().is_none(),
+			"Extension is disabled, so no usage should be tracked for non-restricted origins."
+		);
+	});
+}

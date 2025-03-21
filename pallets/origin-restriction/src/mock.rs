@@ -304,6 +304,24 @@ pub fn exec_signed_tx(
 	let tx_ext = (RestrictOrigin::<Test>::new(true),);
 	let tx = UncheckedExtrinsic::new_signed(call.into(), who, UintAuthorityId(who), tx_ext);
 
+	exec_tx(tx)
+}
+
+/// Execute a transaction with the given origin, call and transaction extension. but with the
+/// `RestrictOrigin` disabled.
+pub fn exec_signed_tx_disabled(
+	who: u64,
+	call: impl Into<RuntimeCall>,
+) -> Result<(), TransactionExecutionError> {
+	// Construct the extension with `false` for the enabling boolean.
+	let tx_ext = (RestrictOrigin::<Test>(false, Default::default()),);
+	let tx = UncheckedExtrinsic::new_signed(call.into(), who, UintAuthorityId(who), tx_ext);
+
+	exec_tx(tx)
+}
+
+/// Execute a transaction with the given origin, call and transaction extension.
+pub fn exec_tx(tx: UncheckedExtrinsic) -> Result<(), TransactionExecutionError> {
 	let info = tx.get_dispatch_info();
 	let len = tx.encoded_size();
 
