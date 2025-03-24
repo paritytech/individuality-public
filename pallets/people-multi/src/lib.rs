@@ -681,9 +681,9 @@ pub mod pallet {
 
 	impl<T: Config> Default for GenesisConfig<T> {
 		fn default() -> Self {
-			use individuality_support::genesis::{get_chunks_from_vrf_key, SMALL_VK};
+			use individuality_support::genesis::ring_verifier_builder_params_raw;
 			Self {
-				encoded_chunks: get_chunks_from_vrf_key(SMALL_VK),
+				encoded_chunks: ring_verifier_builder_params_raw(),
 				_phantom_data: PhantomData,
 				onboarding_size: T::MaxRingSize::get(),
 			}
