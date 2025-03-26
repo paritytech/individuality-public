@@ -133,6 +133,9 @@ use sp_runtime::{
 };
 use verifiable::{Alias, GenerateVerifiable};
 
+#[cfg(feature = "runtime-benchmarks")]
+pub use benchmarking::BenchmarkHelper;
+
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
@@ -211,6 +214,10 @@ pub mod pallet {
 		/// Maximum time in blocks that a task transaction to drive ring changes may stay alive.
 		#[pallet::constant]
 		type MaxTaskLifespan: Get<BlockNumberFor<Self>>;
+
+		/// Helper for benchmarks.
+		#[cfg(feature = "runtime-benchmarks")]
+		type BenchmarkHelper: BenchmarkHelper<<Self::Crypto as GenerateVerifiable>::StaticChunk>;
 	}
 
 	/// The current individuals we recognise.
@@ -1840,22 +1847,14 @@ pub mod pallet {
 		}
 
 		#[cfg(feature = "runtime-benchmarks")]
-		type Secret = PersonalId;
+		type Secret = <<T as Config>::Crypto as GenerateVerifiable>::Secret;
 
 		#[cfg(feature = "runtime-benchmarks")]
-		fn mock_key(_who: PersonalId) -> (Self::Member, Self::Secret) {
-			// SHAWN TODO: implement this.
-			unimplemented!()
-		}
-
-		#[cfg(feature = "runtime-benchmarks")]
-		fn mock_signature(
-			_referrer: PersonalId,
-			_msg: &[u8],
-			_secret: &Self::Secret,
-		) -> Self::Signature {
-			// SHAWN TODO: implement this.
-			unimplemented!()
+		fn mock_key(who: PersonalId) -> (Self::Member, Self::Secret) {
+			let mut buf = [0u8; 32];
+			buf[..core::mem::size_of::<PersonalId>()].copy_from_slice(&who.to_le_bytes()[..]);
+			let secret = T::Crypto::new_secret(buf);
+			(T::Crypto::member_from_secret(&secret), secret)
 		}
 	}
 

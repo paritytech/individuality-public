@@ -28,14 +28,6 @@ const SEED: u32 = 0;
 
 type SecretOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Secret;
 
-#[allow(unused)]
-type ProofOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Proof;
-
-#[allow(unused)]
-fn assert_last_event<T: Config + Send + Sync>(generic_event: <T as Config>::RuntimeEvent) {
-	frame_system::Pallet::<T>::assert_last_event(generic_event.into());
-}
-
 fn new_member_from<T: Config + Send + Sync>(i: u32, seed: u32) -> (SecretOf<T>, MemberOf<T>) {
 	let mut entropy = &(i, seed).encode()[..];
 	let mut entropy = AppendZerosInput::new(&mut entropy);
@@ -54,10 +46,10 @@ fn generate_members_for_ring<T: Config + Send + Sync>(
 
 fn generate_members<T: Config + Send + Sync>(
 	seed: u32,
-	start: u8,
-	end: u8,
+	start: u32,
+	end: u32,
 ) -> Vec<(SecretOf<T>, MemberOf<T>)> {
-	(start..end).map(|i| new_member_from::<T>(i as u32, seed)).collect::<Vec<_>>()
+	(start..end).map(|i| new_member_from::<T>(i, seed)).collect::<Vec<_>>()
 }
 
 pub fn recognize_people<T: Config + Send + Sync>(
@@ -73,12 +65,54 @@ pub fn recognize_people<T: Config + Send + Sync>(
 	people
 }
 
-pub trait ContextToUseInPeopleBenchmarks {
+pub trait BenchmarkHelper<Chunk> {
 	fn valid_account_context() -> Context;
+	fn initialize_chunks() -> Vec<Chunk>;
+}
+
+#[cfg(feature = "std")]
+impl BenchmarkHelper<()> for () {
+	fn valid_account_context() -> Context {
+		[0u8; 32]
+	}
+
+	fn initialize_chunks() -> Vec<()> {
+		vec![]
+	}
+}
+
+#[cfg(feature = "std")]
+impl BenchmarkHelper<verifiable::ring_vrf_impl::StaticChunk> for () {
+	fn valid_account_context() -> Context {
+		[0u8; 32]
+	}
+
+	fn initialize_chunks() -> Vec<verifiable::ring_vrf_impl::StaticChunk> {
+		vec![]
+	}
+}
+
+fn prepare_chunks<T: Config>() {
+	let chunks = T::BenchmarkHelper::initialize_chunks();
+
+	let page_size = <T as Config>::ChunkPageSize::get();
+
+	let mut page_idx = 0;
+	let mut chunk_idx = 0;
+	while chunk_idx < chunks.len() {
+		let chunk_idx_end = core::cmp::min(chunk_idx + page_size as usize, chunks.len());
+		let chunk_page: ChunksOf<T> = chunks[chunk_idx..chunk_idx_end]
+			.to_vec()
+			.try_into()
+			.expect("page size was checked against the array length; qed");
+		Chunks::<T>::insert(page_idx, chunk_page);
+		page_idx += 1;
+		chunk_idx = chunk_idx_end;
+	}
 }
 
 #[benchmarks(
-	where T: Config + core::marker::Send + core::marker::Sync + ContextToUseInPeopleBenchmarks,
+	where T: Config + core::marker::Send + core::marker::Sync,
 )]
 mod benches {
 	use super::*;
@@ -90,6 +124,8 @@ mod benches {
 
 	#[benchmark]
 	fn as_personal_identity() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let caller: T::AccountId = whitelisted_caller();
 		let members = generate_members_for_ring::<T>(SEED);
@@ -117,6 +153,8 @@ mod benches {
 
 	#[benchmark]
 	fn as_personal_alias() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let caller: T::AccountId = whitelisted_caller();
 		let members = generate_members_for_ring::<T>(SEED);
@@ -128,7 +166,7 @@ mod benches {
 		let call = frame_system::Call::<T>::remark { remark: vec![] };
 		let boxed_call: Box<<T as frame_system::Config>::RuntimeCall> = Box::new(call.into());
 
-		let context = <T as ContextToUseInPeopleBenchmarks>::valid_account_context();
+		let context = T::BenchmarkHelper::valid_account_context();
 
 		// Generate a valid proof
 		let proof = boxed_call.using_encoded(|msg| {
@@ -151,6 +189,8 @@ mod benches {
 
 	#[benchmark]
 	fn under_alias() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -159,7 +199,7 @@ mod benches {
 
 		// Create account and alias
 		let account: T::AccountId = whitelisted_caller();
-		let context = <T as ContextToUseInPeopleBenchmarks>::valid_account_context();
+		let context = T::BenchmarkHelper::valid_account_context();
 		let alias_value: Alias = [0u8; 32];
 		let ra = RevisedContextualAlias {
 			revision: 0,
@@ -189,6 +229,8 @@ mod benches {
 
 	#[benchmark]
 	fn set_alias_account() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -200,7 +242,7 @@ mod benches {
 		let alias_value: Alias = [0u8; 32];
 		let alias = RevisedContextualAlias {
 			ca: ContextualAlias {
-				context: <T as ContextToUseInPeopleBenchmarks>::valid_account_context(),
+				context: T::BenchmarkHelper::valid_account_context(),
 				alias: alias_value,
 			},
 			revision: 0,
@@ -232,6 +274,8 @@ mod benches {
 
 	#[benchmark]
 	fn unset_alias_account() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -244,7 +288,7 @@ mod benches {
 		let alias_value: Alias = [0u8; 32];
 		let alias = RevisedContextualAlias {
 			ca: ContextualAlias {
-				context: <T as ContextToUseInPeopleBenchmarks>::valid_account_context(),
+				context: T::BenchmarkHelper::valid_account_context(),
 				alias: alias_value,
 			},
 			revision: 0,
@@ -284,6 +328,8 @@ mod benches {
 
 	#[benchmark]
 	fn set_personal_id_account() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		let people = recognize_people::<T>(&members);
@@ -317,6 +363,8 @@ mod benches {
 
 	#[benchmark]
 	fn unset_personal_id_account() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		let people = recognize_people::<T>(&members);
@@ -360,27 +408,46 @@ mod benches {
 
 	#[benchmark]
 	fn merge_rings() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Two rings exist
 		let ring_size: u32 = <T as Config>::MaxRingSize::get();
-		let members = generate_members::<T>(SEED, 0, ring_size as u8 * 2);
+		let members = generate_members::<T>(SEED, 0, ring_size * 2);
+
 		recognize_people::<T>(&members);
 		assert_ok!(pallet::Pallet::<T>::onboard_people(SystemOrigin::None.into()));
+		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO).total, ring_size);
+
 		assert_ok!(pallet::Pallet::<T>::onboard_people(SystemOrigin::None.into()));
+		assert_eq!(RingKeysStatus::<T>::get(1).total, ring_size);
+
 		assert_ok!(pallet::Pallet::<T>::build_ring(SystemOrigin::None.into(), RI_ZERO, None));
+		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO).included, ring_size);
+
 		assert_ok!(pallet::Pallet::<T>::build_ring(SystemOrigin::None.into(), 1, None));
+		assert_eq!(RingKeysStatus::<T>::get(1).included, ring_size);
 
 		// Suspend and remove more than half of the people in both rings
 		assert_ok!(pallet::Pallet::<T>::start_people_set_mutation_session());
-		let suspensions: Vec<PersonalId> = (1..ring_size / 2 + 2)
-			.chain(ring_size + 1..ring_size * 3 / 2 + 2)
+		let suspensions: Vec<PersonalId> = (1..ring_size / 2 + 3)
+			.chain(ring_size + 1..ring_size * 3 / 2 + 3)
 			.map(|i| i as PersonalId)
 			.collect();
 		assert_ok!(pallet::Pallet::<T>::suspend_personhood(&suspensions));
 		assert_ok!(pallet::Pallet::<T>::end_people_set_mutation_session());
+
+		assert!(PendingSuspensions::<T>::get(RI_ZERO).len() > (ring_size / 2) as usize);
+		assert!(PendingSuspensions::<T>::get(1).len() > (ring_size / 2) as usize);
+
 		assert_ok!(pallet::Pallet::<T>::migrate_keys(SystemOrigin::None.into(), None));
 
 		assert_ok!(pallet::Pallet::<T>::remove_suspended_keys(SystemOrigin::None.into(), RI_ZERO));
 		assert_ok!(pallet::Pallet::<T>::remove_suspended_keys(SystemOrigin::None.into(), 1));
+
+		assert!(RingKeys::<T>::get(RI_ZERO).len() < (ring_size / 2) as usize);
+		assert!(RingKeys::<T>::get(1).len() < (ring_size / 2) as usize);
+
+		let keys_left_len = RingKeys::<T>::get(RI_ZERO).len() + RingKeys::<T>::get(1).len();
 
 		// The current ring has to have a higher index than the ones being merged
 		CurrentRingIndex::<T>::set(14);
@@ -388,8 +455,8 @@ mod benches {
 		#[extrinsic_call]
 		_(SystemOrigin::None, RI_ZERO, 1);
 
-		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), 8);
-		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO).total, 8);
+		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), keys_left_len);
+		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO).total, keys_left_len as u32);
 		assert!(Root::<T>::get(RI_ZERO).is_some());
 		assert!(Root::<T>::get(1).is_none());
 
@@ -398,6 +465,8 @@ mod benches {
 
 	#[benchmark]
 	fn migrate_included_key() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -420,6 +489,8 @@ mod benches {
 
 	#[benchmark]
 	fn migrate_onboarding_key() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -447,16 +518,19 @@ mod benches {
 	fn validate_unsigned_with_build_ring(
 		n: Linear<1, { T::MaxRingSize::get() }>,
 	) -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// One full queue page of people awaiting
 		let queue_page_size: u32 = <T as Config>::OnboardingQueuePageSize::get();
-		let members = generate_members::<T>(SEED, 0, queue_page_size as u8);
+		let ring_size: u32 = <T as Config>::MaxRingSize::get();
+		let members = generate_members::<T>(SEED, 0, queue_page_size);
 		recognize_people::<T>(&members);
 		assert_ok!(pallet::Pallet::<T>::onboard_people(SystemOrigin::None.into()));
 
 		// No ring built but people onboarded successfully
 		assert!(Root::<T>::get(RI_ZERO).is_none());
-		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), 10);
-		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO), RingStatus { total: 10, included: 0 });
+		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), ring_size as usize);
+		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO), RingStatus { total: ring_size, included: 0 });
 
 		#[block]
 		{
@@ -471,29 +545,34 @@ mod benches {
 
 		// The ring becomes built
 		assert!(Root::<T>::get(RI_ZERO).is_some());
-		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), 10);
-		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO), RingStatus { total: 10, included: n });
+		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), ring_size as usize);
+		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO), RingStatus { total: ring_size, included: n });
 
 		Ok(())
 	}
 
 	#[benchmark]
 	fn validate_unsigned_with_onboard_people() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// One full ring exists
 		let ring_size: u32 = <T as Config>::MaxRingSize::get();
-		let members = generate_members::<T>(SEED, 0, ring_size as u8);
+		let members = generate_members::<T>(SEED, 0, ring_size);
 		recognize_people::<T>(&members);
 		assert_ok!(pallet::Pallet::<T>::onboard_people(SystemOrigin::None.into()));
 		assert_ok!(pallet::Pallet::<T>::build_ring(SystemOrigin::None.into(), RI_ZERO, None));
-		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), 10);
-		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO), RingStatus { total: 10, included: 10 });
+		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), ring_size as usize);
+		assert_eq!(
+			RingKeysStatus::<T>::get(RI_ZERO),
+			RingStatus { total: ring_size, included: ring_size }
+		);
 
 		assert_eq!(QueuePageIndices::<T>::get(), (0, 0));
 		assert!(OnboardingQueue::<T>::get(0).is_empty());
 
 		// 1st onboarding page with fewer people than open slots
-		let keys_len: u8 = Keys::<T>::iter().collect::<Vec<_>>().len().try_into().unwrap();
-		let members = generate_members::<T>(SEED, keys_len, keys_len + ring_size as u8 / 2);
+		let keys_len: u32 = Keys::<T>::iter().collect::<Vec<_>>().len().try_into().unwrap();
+		let members = generate_members::<T>(SEED, keys_len, keys_len + ring_size / 2);
 		recognize_people::<T>(&members);
 		assert_eq!(OnboardingQueue::<T>::get(0).len(), (ring_size as u8 / 2) as usize);
 
@@ -502,14 +581,14 @@ mod benches {
 		assert!(OnboardingQueue::<T>::get(1).is_empty());
 
 		// 2nd onboarding page full
-		let keys_len: u8 = Keys::<T>::iter().collect::<Vec<_>>().len().try_into().unwrap();
-		assert_eq!(keys_len, (ring_size + ring_size / 2) as u8);
+		let keys_len: u32 = Keys::<T>::iter().collect::<Vec<_>>().len().try_into().unwrap();
+		assert_eq!(keys_len, (ring_size + ring_size / 2));
 		let queue_page_size: u32 = <T as Config>::OnboardingQueuePageSize::get();
-		let members = generate_members::<T>(SEED, keys_len, keys_len + queue_page_size as u8);
+		let members = generate_members::<T>(SEED, keys_len, keys_len + queue_page_size);
 		recognize_people::<T>(&members);
 
 		assert_eq!(QueuePageIndices::<T>::get(), (0, 1));
-		assert_eq!(OnboardingQueue::<T>::get(0).len(), (ring_size as u8 / 2) as usize);
+		assert_eq!(OnboardingQueue::<T>::get(0).len(), (ring_size / 2) as usize);
 		assert!(OnboardingQueue::<T>::get(1).is_full());
 
 		assert_eq!(RingKeys::<T>::get(1).len(), 0);
@@ -525,8 +604,8 @@ mod benches {
 			call.dispatch_bypass_filter(RawOrigin::None.into())?;
 		}
 
-		assert_eq!(RingKeys::<T>::get(1).len(), 10);
-		assert_eq!(RingKeysStatus::<T>::get(1), RingStatus { total: 10, included: 0 });
+		assert_eq!(RingKeys::<T>::get(1).len(), ring_size as usize);
+		assert_eq!(RingKeysStatus::<T>::get(1), RingStatus { total: ring_size, included: 0 });
 
 		Ok(())
 	}
@@ -535,6 +614,8 @@ mod benches {
 	fn validate_unsigned_with_remove_suspended_keys(
 		n: Linear<1, { T::MaxRingSize::get() }>,
 	) -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -584,6 +665,8 @@ mod benches {
 	fn validate_unsigned_with_migrate_keys(
 		n: Linear<1, { T::MaxRingSize::get() }>,
 	) -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -624,9 +707,11 @@ mod benches {
 
 	#[benchmark]
 	fn validate_unsigned_with_merge_queue_pages() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
 		// Two pages exists: first is full, the second contains one member
 		let queue_page_size: u32 = <T as Config>::OnboardingQueuePageSize::get();
-		let members = generate_members::<T>(SEED, 0, queue_page_size as u8 + 1);
+		let members = generate_members::<T>(SEED, 0, queue_page_size + 1);
 		recognize_people::<T>(&members);
 
 		assert_eq!(QueuePageIndices::<T>::get(), (0, 1));

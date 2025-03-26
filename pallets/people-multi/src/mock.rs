@@ -24,9 +24,6 @@ use frame_support::{
 	storage::with_transaction,
 };
 
-#[cfg(feature = "runtime-benchmarks")]
-use crate::benchmarking::ContextToUseInPeopleBenchmarks;
-
 use frame_system::{offchain::CreateTransactionBase, ChainContext};
 use sp_core::{ConstU16, ConstU32, ConstU64, H256};
 use sp_runtime::{
@@ -119,12 +116,24 @@ impl crate::Config for Test {
 	type RingBakingInterval = ConstU64<10>;
 	type QueuePageMergingInterval = ConstU64<10>;
 	type MaxTaskLifespan = ConstU64<5>;
+
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = BenchHelper;
 }
 
 #[cfg(feature = "runtime-benchmarks")]
-impl ContextToUseInPeopleBenchmarks for Test {
+pub struct BenchHelper {}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl<Chunk> BenchmarkHelper<Chunk> for BenchHelper
+where
+	Chunk: From<<verifiable::demo_impls::Simple as verifiable::GenerateVerifiable>::StaticChunk>,
+{
 	fn valid_account_context() -> Context {
 		MOCK_CONTEXT
+	}
+	fn initialize_chunks() -> Vec<Chunk> {
+		vec![]
 	}
 }
 
