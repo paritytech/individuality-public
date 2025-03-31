@@ -120,7 +120,9 @@ use frame_support::{
 		extract_actual_weight, DispatchInfo, DispatchResultWithPostInfo, GetDispatchInfo,
 		PostDispatchInfo,
 	},
+	storage::with_storage_layer,
 	traits::{Defensive, EnsureOriginWithArg, IsSubType, OriginTrait},
+	weights::WeightMeter,
 };
 use frame_system::offchain::{CreateInherent, SubmitTransaction};
 use individuality_support::traits::{
@@ -493,33 +495,75 @@ pub mod pallet {
 			);
 		}
 
-		fn offchain_worker(block_number: BlockNumberFor<T>) {
+		fn on_poll(_: BlockNumberFor<T>, weight_meter: &mut WeightMeter) {
 			// Check if there are any keys to migrate.
-			if Self::should_migrate_keys().is_some() {
-				let limit = Some(T::MaxRingSize::get());
-				let res = Self::submit_unsigned_transaction(Call::migrate_keys { limit });
-				Self::log_offchain_worker_tx_submit_result(res, "migrate_keys");
+			if weight_meter.try_consume(T::WeightInfo::on_poll_base()).is_err() {
 				return;
+			}
+			if RingsState::<T>::get().key_migration() {
+				Self::migrate_keys(weight_meter);
 			}
 
 			// Check if there are any rings with suspensions and try to clean the first one.
 			if let Some(ring_index) = PendingSuspensions::<T>::iter_keys().next() {
-				if Self::should_remove_suspended_keys(ring_index) {
-					let res = Self::submit_unsigned_transaction(Call::remove_suspended_keys {
-						ring_index,
-					});
-					Self::log_offchain_worker_tx_submit_result(res, "remove_suspended_keys");
+				if Self::should_remove_suspended_keys(ring_index, true) &&
+					weight_meter.can_consume(T::WeightInfo::remove_suspended_people(
+						T::MaxRingSize::get(),
+					)) {
+					let actual = Self::remove_suspended_keys(ring_index);
+					weight_meter.consume(actual)
 				}
 			}
 
-			// Check if the top queue pages can be merged to defragment the list.
-			if (block_number % T::QueuePageMergingInterval::get()).saturated_into::<u32>() != 0 &&
-				matches!(Self::should_merge_queue_pages(), QueueMergeAction::Merge { .. })
-			{
-				let res = Self::submit_unsigned_transaction(Call::merge_queue_pages {});
-				Self::log_offchain_worker_tx_submit_result(res, "merge_queue_pages");
+			let merge_weight = T::WeightInfo::merge_queue_pages();
+			if !weight_meter.can_consume(merge_weight) {
+				return;
 			}
+			let merge_action = Self::should_merge_queue_pages();
+			if let QueueMergeAction::Merge {
+				initial_head,
+				new_head,
+				first_key_page,
+				second_key_page,
+			} = merge_action
+			{
+				Self::merge_queue_pages(initial_head, new_head, first_key_page, second_key_page);
+				weight_meter.consume(merge_weight);
+			}
+		}
 
+		fn on_idle(_block: BlockNumberFor<T>, limit: Weight) -> Weight {
+			let mut weight_meter = WeightMeter::with_limit(limit);
+			let remove_people_weight =
+				T::WeightInfo::remove_suspended_people(T::MaxRingSize::get());
+
+			// Check if there are any rings with suspensions and try to clean as many as possible.
+			// First check the state of the rings allow for removals and then that we have enough
+			// weight for at least one iteration.
+			if !RingsState::<T>::get().append_only() ||
+				!weight_meter.can_consume(remove_people_weight)
+			{
+				return weight_meter.consumed();
+			}
+			// Always renew the iterator because in each iteration we remove a key, which would make
+			// the old iterator unstable.
+			while let Some(ring_index) = PendingSuspensions::<T>::iter_keys().next() {
+				if Self::should_remove_suspended_keys(ring_index, false) {
+					let actual = Self::remove_suspended_keys(ring_index);
+					weight_meter.consume(actual)
+				}
+				// Break the loop if we run out of weight.
+				if !weight_meter.can_consume(remove_people_weight) {
+					return weight_meter.consumed();
+				}
+			}
+			weight_meter.consumed()
+		}
+
+		fn offchain_worker(block_number: BlockNumberFor<T>) {
+			if !RingsState::<T>::get().append_only() {
+				return
+			}
 			// Check the top ring to try to onboard people, then find the first that needs baking
 			let current_ring = CurrentRingIndex::<T>::get();
 			let limit =
@@ -626,49 +670,6 @@ pub mod pallet {
 
 					ValidTransaction::with_tag_prefix("PersonhoodOnboarding")
 						.and_provides(current_ring)
-						.longevity(tx_longevity.saturated_into())
-						.propagate(true)
-						.build()
-				},
-				Call::remove_suspended_keys { ring_index } => {
-					// Make sure the ring requires cleaning and that there are keys to suspend.
-					if !Self::should_remove_suspended_keys(*ring_index) {
-						return InvalidTransaction::Stale.into();
-					}
-
-					let tx_longevity = T::MaxTaskLifespan::get();
-
-					ValidTransaction::with_tag_prefix("PersonhoodSuspendedPeopleRemoval")
-						.and_provides(ring_index)
-						.longevity(tx_longevity.saturated_into())
-						.propagate(true)
-						.build()
-				},
-				Call::merge_queue_pages {} => {
-					let QueueMergeAction::Merge { new_head, .. } = Self::should_merge_queue_pages()
-					else {
-						return InvalidTransaction::Stale.into();
-					};
-
-					let tx_longevity = T::MaxTaskLifespan::get();
-
-					ValidTransaction::with_tag_prefix("PersonhoodMergeQueuePages")
-						.and_provides(new_head)
-						.longevity(tx_longevity.saturated_into())
-						.propagate(true)
-						.build()
-				},
-				Call::migrate_keys { .. } => {
-					// Make sure the ring requires cleaning and that the provided indices are valid
-					let Some(counter) = Self::should_migrate_keys() else {
-						return InvalidTransaction::Stale.into();
-					};
-
-					let tx_longevity = T::MaxTaskLifespan::get();
-					let provides =
-						sp_io::hashing::twox_64(&("keys_migration", counter).encode()[..]);
-					ValidTransaction::with_tag_prefix("PersonhoodKeysMigration")
-						.and_provides(provides)
 						.longevity(tx_longevity.saturated_into())
 						.propagate(true)
 						.build()
@@ -953,165 +954,8 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// Task to remove people's keys marked as suspended or inactive from the rings. The
-		/// offchain worker must provide the list of indices of the suspended keys in the
-		/// ring. These indices must be in ascending order and refer to keys which either are being
-		/// migrated or belong to people that are actually suspended. The list has to be
-		/// exhaustive, as one call to this function should remove all suspended keys. In
-		/// practice, this should be feasible as ring sizes are still small and there isn't a lot
-		/// of computation happening per removed key.
-		#[pallet::weight(T::WeightInfo::validate_unsigned_with_remove_suspended_people(
-			T::MaxRingSize::get()
-		))]
-		#[pallet::call_index(111)]
-		pub fn remove_suspended_keys(
-			_origin: OriginFor<T>,
-			ring_index: RingIndex,
-		) -> DispatchResult {
-			let keys = RingKeys::<T>::get(ring_index);
-			if !Self::should_remove_suspended_keys(ring_index) {
-				return Err(Error::<T>::InvalidSuspensions.into());
-			}
-			let suspended_indices = PendingSuspensions::<T>::get(ring_index);
-			// Construct the new keys map by skipping the suspended keys. This should prevent
-			// reallocations in the `Vec` which happens with `remove`.
-			let mut new_keys: BoundedVec<MemberOf<T>, T::MaxRingSize> = Default::default();
-			let mut j = 0;
-			for (i, key) in keys.into_iter().enumerate() {
-				if j < suspended_indices.len() && i == suspended_indices[j] as usize {
-					j += 1;
-				} else {
-					new_keys.try_push(key).map_err(|_| Error::<T>::TooManyMembers)?;
-				}
-			}
-
-			let suspended_count = RingKeysStatus::<T>::mutate(ring_index, |ring_status| {
-				let new_total = new_keys.len().saturated_into();
-				let suspended_count = ring_status.total.saturating_sub(new_total);
-				ring_status.total = new_total;
-				ring_status.included = 0;
-				suspended_count
-			});
-			ActiveMembers::<T>::mutate(|active| *active = active.saturating_sub(suspended_count));
-			RingKeys::<T>::insert(ring_index, new_keys);
-			Root::<T>::mutate(ring_index, |maybe_root| {
-				if let Some(root) = maybe_root {
-					// The revision will be incremented on the next call of `build_ring`. The
-					// current root is preserved.
-					root.intermediate = T::Crypto::start_members();
-				}
-			});
-
-			// Make sure to remove the entry from the map so that the offchain worker doesn't
-			// iterate over it.
-			PendingSuspensions::<T>::remove(ring_index);
-
-			Ok(())
-		}
-
-		/// Task to merge the two pages at the front of the onboarding queue, if possible. After a
-		/// round of suspensions, it is possible for the second page of the onboarding queue to be
-		/// left with few members such that, if the first page also has few members, the total count
-		/// is below the required onboarding size, thus stalling the queue. This task fixes this by
-		/// moving the people from the first page to the front of the second page, defragmenting the
-		/// queue. While this task is scheduled to check for possible queue fragmentation every
-		/// `T::QueuePageMergingInterval` blocks, this can also be done through an unsigned call.
-		///
-		/// This is a task!!
-		#[pallet::weight(T::WeightInfo::validate_unsigned_with_merge_queue_pages())]
-		#[pallet::call_index(106)]
-		pub fn merge_queue_pages(origin: OriginFor<T>) -> DispatchResult {
-			ensure_none(origin)?;
-
-			let QueueMergeAction::Merge {
-				initial_head,
-				new_head,
-				mut first_key_page,
-				second_key_page,
-			} = Self::should_merge_queue_pages()
-			else {
-				return Err(Error::<T>::QueueStable.into());
-			};
-
-			// Update the records of the people in the first page.
-			for key in first_key_page.iter() {
-				let personal_id = Keys::<T>::get(key).defensive().ok_or(Error::<T>::NotPerson)?;
-				let mut record =
-					People::<T>::get(personal_id).defensive().ok_or(Error::<T>::KeyNotFound)?;
-				record.position = RingPosition::Onboarding { queue_page: new_head };
-				People::<T>::insert(personal_id, record);
-			}
-
-			first_key_page
-				.try_extend(second_key_page.into_iter())
-				.defensive()
-				.map_err(|_| Error::<T>::TooManyMembers)?;
-			OnboardingQueue::<T>::remove(initial_head);
-			OnboardingQueue::<T>::insert(new_head, first_key_page);
-			QueuePageIndices::<T>::mutate(|(h, _)| *h = new_head);
-
-			Ok(())
-		}
-
-		/// Task to migrate keys that people intend to replace with other keys, if possible. As this
-		/// task mutates a fair amount of storage, it comes with a limit on the number of keys to
-		/// migrate in one call. The offchain worker will try to migrate a number of keys equal to
-		/// the current onboarding size.
-		///
-		/// This is a task!!
-		#[pallet::weight(Weight::zero())]
-		#[pallet::call_index(107)]
-		pub fn migrate_keys(origin: OriginFor<T>, limit: Option<u32>) -> DispatchResult {
-			ensure_none(origin)?;
-
-			let rings_state = RingsState::<T>::get();
-			ensure!(rings_state.key_migration(), Error::<T>::NoKeyMigrationSession);
-			let limit = limit.unwrap_or(T::MaxRingSize::get());
-			let mut drain = KeyMigrationQueue::<T>::drain();
-			for _ in 0..limit {
-				match drain.next() {
-					Some((id, new_key)) =>
-						if let Some(record) = People::<T>::get(id) {
-							let RingPosition::Included {
-								ring_index,
-								ring_position,
-								scheduled_for_removal: true,
-							} = record.position
-							else {
-								Keys::<T>::remove(new_key);
-								continue
-							};
-							let mut suspended_indices = PendingSuspensions::<T>::get(ring_index);
-							let Err(insert_idx) = suspended_indices.binary_search(&ring_position)
-							else {
-								return Err(Error::<T>::KeyAlreadySuspended.into())
-							};
-							suspended_indices
-								.try_insert(insert_idx, ring_position)
-								.map_err(|_| Error::<T>::TooManyMembers)?;
-							PendingSuspensions::<T>::insert(ring_index, suspended_indices);
-							Keys::<T>::remove(&record.key);
-							Self::push_to_onboarding_queue(id, new_key, record.account)?;
-						},
-					None => {
-						let rings_state = rings_state
-							.end_key_migration()
-							.map_err(|_| Error::<T>::NoMutationSession)?;
-						RingsState::<T>::put(rings_state);
-						break
-					},
-				}
-			}
-
-			MigrationTaskCounter::<T>::mutate(|c| {
-				*c = c.checked_add(1).unwrap_or(0);
-			});
-			Ok(())
-		}
-
 		// NOTE: This might be removed in the future. Use the `AsPerson` transaction
 		// extension to dispatch call with signature instead.
-		// TODO: weight here is a bit complicated. see `pallet_utility::as_derivative` for hints.
 		#[pallet::call_index(1)]
 		#[pallet::weight(T::WeightInfo::as_personal_identity().saturating_add(call.get_dispatch_info().call_weight))]
 		pub fn as_personal_identity(
@@ -1125,16 +969,14 @@ pub mod pallet {
 			let key = record.key;
 			let ok = call.using_encoded(|msg| T::Crypto::verify_signature(&signature, msg, &key));
 			ensure!(ok, Error::<T>::InvalidSignature);
-			Self::derivative_call(origin, Origin::PersonalIdentity(index), *call)?;
-			// TODO: This is how we handle tasks for now.
-			Ok(Pays::No.into())
+			let derivation_weight = T::WeightInfo::as_personal_identity();
+			Self::derivative_call(origin, Origin::PersonalIdentity(index), *call, derivation_weight)
 		}
 
 		// NOTE: This might be removed in the future. Use the `AsPerson` transaction
 		// extension to dispatch call with signature instead.
 		/// Generally this should not be used since it does not protect against replay attacks. If
 		/// used then it is important to use mortal transactions with a short lifespan.
-		// TODO: weight here is a bit complicated. see `pallet_utility::as_derivative` for hints.
 		#[pallet::call_index(2)]
 		#[pallet::weight(T::WeightInfo::as_personal_alias().saturating_add(call.get_dispatch_info().call_weight))]
 		pub fn as_personal_alias(
@@ -1154,18 +996,14 @@ pub mod pallet {
 				ring: ring_index,
 				ca: ContextualAlias { alias, context },
 			});
-			Self::derivative_call(origin, local_origin, *call)?;
-			Ok(Pays::No.into())
+			let derivation_weight = T::WeightInfo::as_personal_alias();
+			Self::derivative_call(origin, local_origin, *call, derivation_weight)
 		}
-
-		// TODO: these two and their associated storage/errors/events should be in an independent
-		//   pallet in order to allow for use on other chains.
 
 		// NOTE: This might be removed in the future. Use the `AsPerson` transaction
 		// extension to dispatch call with signature instead.
 		// Note this is not feeless even if the `call` is feeless. This is because we cannot
 		// easily fetch the feelessness of `call` from within our feeless condition.
-		// TODO: weight here is a bit complicated. see `pallet_utility::as_derivative` for hints.
 		#[pallet::call_index(3)]
 		#[pallet::weight(T::WeightInfo::under_alias().saturating_add(call.get_dispatch_info().call_weight))]
 		pub fn under_alias(
@@ -1179,10 +1017,9 @@ pub mod pallet {
 				DispatchError::BadOrigin,
 			);
 
+			let derivation_weight = T::WeightInfo::under_alias();
 			let local_origin = Origin::PersonalAlias(rev_ca);
-			Self::derivative_call(origin, local_origin, *call)?;
-			// TODO: This is how we handle tasks for now.
-			Ok(Pays::No.into())
+			Self::derivative_call(origin, local_origin, *call, derivation_weight)
 		}
 
 		/// This transaction is refunded if successful and no alias was previously set.
@@ -1509,8 +1346,11 @@ pub mod pallet {
 		}
 
 		/// Returns whether suspensions are allowed and necessary for a given ring index.
-		fn should_remove_suspended_keys(ring_index: RingIndex) -> bool {
-			if !RingsState::<T>::get().append_only() {
+		pub(crate) fn should_remove_suspended_keys(
+			ring_index: RingIndex,
+			check_rings_state: bool,
+		) -> bool {
+			if check_rings_state && !RingsState::<T>::get().append_only() {
 				return false;
 			}
 			let suspended_count = PendingSuspensions::<T>::decode_len(ring_index).unwrap_or(0);
@@ -1530,7 +1370,7 @@ pub mod pallet {
 		/// * The new `head` of the queue.
 		/// * The keys on the first page of the queue.
 		/// * The keys on the second page of the queue.
-		fn should_merge_queue_pages() -> QueueMergeAction<T> {
+		pub(crate) fn should_merge_queue_pages() -> QueueMergeAction<T> {
 			let (initial_head, tail) = QueuePageIndices::<T>::get();
 			let first_key_page = OnboardingQueue::<T>::get(initial_head);
 			// A `head != tail` condition should mean that there is at least one more page
@@ -1550,32 +1390,24 @@ pub mod pallet {
 			QueueMergeAction::Merge { initial_head, new_head, first_key_page, second_key_page }
 		}
 
-		/// This function checks whenever it is possible to migrate people's keys. If a migration is
-		/// possible, this function returns the counter of the number of previous `migrate_keys`
-		/// successful calls, in order to construct a provider tag for the transaction.
-		fn should_migrate_keys() -> Option<u32> {
-			if !RingsState::<T>::get().key_migration() {
-				return None;
-			}
-			Some(MigrationTaskCounter::<T>::get())
-		}
-
 		fn derivative_call(
 			mut origin: OriginFor<T>,
 			local_origin: Origin,
 			call: <T as frame_system::Config>::RuntimeCall,
+			derivation_weight: Weight,
 		) -> DispatchResultWithPostInfo {
 			origin.set_caller_from(<T::RuntimeOrigin as OriginTrait>::PalletsOrigin::from(
 				local_origin,
 			));
 			let info = call.get_dispatch_info();
 			let result = call.dispatch(origin);
-			let weight = T::WeightInfo::as_personal_alias()
-				.saturating_add(extract_actual_weight(&result, &info));
-			result.map(|_| Some(weight).into()).map_err(|mut err| {
-				err.post_info = Some(weight).into();
-				err
-			})
+			let weight = derivation_weight.saturating_add(extract_actual_weight(&result, &info));
+			result
+				.map(|p| PostDispatchInfo { actual_weight: Some(weight), pays_fee: p.pays_fee })
+				.map_err(|mut err| {
+					err.post_info = Some(weight).into();
+					err
+				})
 		}
 
 		/// Ensure that the origin `o` represents a person.
@@ -1792,6 +1624,165 @@ pub mod pallet {
 			}
 
 			Ok(chunks)
+		}
+
+		/// Migrates keys that people intend to replace with other keys, if possible. As this
+		/// function mutates a fair amount of storage, it comes with a weight meter to limit on the
+		/// number of keys to migrate in one call.
+		pub(crate) fn migrate_keys(meter: &mut WeightMeter) {
+			let mut drain = KeyMigrationQueue::<T>::drain();
+			loop {
+				// Ensure we have enough weight to look into `KeyMigrationQueue` and perform a
+				// removal.
+				let weight = T::WeightInfo::migrate_keys_single_included_key()
+					.saturating_add(T::DbWeight::get().reads_writes(1, 1));
+				if !meter.can_consume(weight) {
+					return;
+				}
+
+				let op_res = with_storage_layer::<bool, DispatchError, _>(|| match drain.next() {
+					Some((id, new_key)) =>
+						Self::migrate_keys_single_included_key(id, new_key).map(|_| false),
+					None => {
+						let rings_state = RingsState::<T>::get()
+							.end_key_migration()
+							.map_err(|_| Error::<T>::NoMutationSession)?;
+						RingsState::<T>::put(rings_state);
+						meter.consume(T::DbWeight::get().reads_writes(1, 1));
+						Ok(true)
+					},
+				});
+				match op_res {
+					Ok(false) => meter.consume(weight),
+					Ok(true) => {
+						// Read on `KeyMigrationQueue`.
+						meter.consume(T::DbWeight::get().reads(1));
+						break
+					},
+					Err(e) => {
+						meter.consume(weight);
+						log::error!(target: LOG_TARGET, "failed to migrate keys: {:?}", e);
+						break;
+					},
+				}
+			}
+		}
+
+		/// A single iteration of the key migration process where an included key marked for
+		/// suspension is being removed from a ring.
+		pub(crate) fn migrate_keys_single_included_key(
+			id: PersonalId,
+			new_key: MemberOf<T>,
+		) -> DispatchResult {
+			if let Some(record) = People::<T>::get(id) {
+				let RingPosition::Included {
+					ring_index,
+					ring_position,
+					scheduled_for_removal: true,
+				} = record.position
+				else {
+					Keys::<T>::remove(new_key);
+					return Ok(())
+				};
+				let mut suspended_indices = PendingSuspensions::<T>::get(ring_index);
+				let Err(insert_idx) = suspended_indices.binary_search(&ring_position) else {
+					log::info!(target: LOG_TARGET, "key migration for person {} skipped as the person's key was already suspended", id);
+					return Ok(());
+				};
+				suspended_indices
+					.try_insert(insert_idx, ring_position)
+					.map_err(|_| Error::<T>::TooManyMembers)?;
+				PendingSuspensions::<T>::insert(ring_index, suspended_indices);
+				Keys::<T>::remove(&record.key);
+				Self::push_to_onboarding_queue(id, new_key, record.account)?;
+			} else {
+				log::info!(target: LOG_TARGET, "key migration for person {} skipped as no record was found", id);
+			}
+			Ok(())
+		}
+
+		/// Removes people's keys marked as suspended or inactive from a ring with a given index.
+		pub(crate) fn remove_suspended_keys(ring_index: RingIndex) -> Weight {
+			let keys = RingKeys::<T>::get(ring_index);
+			let keys_len = keys.len();
+			let suspended_indices = PendingSuspensions::<T>::get(ring_index);
+			// Construct the new keys map by skipping the suspended keys. This should prevent
+			// reallocations in the `Vec` which happens with `remove`.
+			let mut new_keys: BoundedVec<MemberOf<T>, T::MaxRingSize> = Default::default();
+			let mut j = 0;
+			for (i, key) in keys.into_iter().enumerate() {
+				if j < suspended_indices.len() && i == suspended_indices[j] as usize {
+					j += 1;
+				} else if new_keys
+					.try_push(key)
+					.defensive_proof("cannot move more ring members than the max ring size; qed")
+					.is_err()
+				{
+					return T::WeightInfo::remove_suspended_people(
+						keys_len.try_into().unwrap_or(u32::MAX),
+					);
+				}
+			}
+
+			let suspended_count = RingKeysStatus::<T>::mutate(ring_index, |ring_status| {
+				let new_total = new_keys.len().saturated_into();
+				let suspended_count = ring_status.total.saturating_sub(new_total);
+				ring_status.total = new_total;
+				ring_status.included = 0;
+				suspended_count
+			});
+			ActiveMembers::<T>::mutate(|active| *active = active.saturating_sub(suspended_count));
+			RingKeys::<T>::insert(ring_index, new_keys);
+			Root::<T>::mutate(ring_index, |maybe_root| {
+				if let Some(root) = maybe_root {
+					// The revision will be incremented on the next call of `build_ring`. The
+					// current root is preserved.
+					root.intermediate = T::Crypto::start_members();
+				}
+			});
+
+			// Make sure to remove the entry from the map so that the offchain worker doesn't
+			// iterate over it.
+			PendingSuspensions::<T>::remove(ring_index);
+			T::WeightInfo::remove_suspended_people(keys_len.try_into().unwrap_or(u32::MAX))
+		}
+
+		/// Merges the two pages at the front of the onboarding queue. After a round of suspensions,
+		/// it is possible for the second page of the onboarding queue to be left with few members
+		/// such that, if the first page also has few members, the total count is below the required
+		/// onboarding size, thus stalling the queue. This function fixes this by moving the people
+		/// from the first page to the front of the second page, defragmenting the queue.
+		///
+		/// If the operation fails, the storage is rolled back.
+		pub(crate) fn merge_queue_pages(
+			initial_head: u32,
+			new_head: u32,
+			mut first_key_page: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize>,
+			second_key_page: BoundedVec<MemberOf<T>, T::OnboardingQueuePageSize>,
+		) {
+			let op_res = with_storage_layer::<(), DispatchError, _>(|| {
+				// Update the records of the people in the first page.
+				for key in first_key_page.iter() {
+					let personal_id =
+						Keys::<T>::get(key).defensive().ok_or(Error::<T>::NotPerson)?;
+					let mut record =
+						People::<T>::get(personal_id).defensive().ok_or(Error::<T>::KeyNotFound)?;
+					record.position = RingPosition::Onboarding { queue_page: new_head };
+					People::<T>::insert(personal_id, record);
+				}
+
+				first_key_page
+					.try_extend(second_key_page.into_iter())
+					.defensive()
+					.map_err(|_| Error::<T>::TooManyMembers)?;
+				OnboardingQueue::<T>::remove(initial_head);
+				OnboardingQueue::<T>::insert(new_head, first_key_page);
+				QueuePageIndices::<T>::mutate(|(h, _)| *h = new_head);
+				Ok(())
+			});
+			if let Err(e) = op_res {
+				log::error!(target: LOG_TARGET, "failed to merge queue pages: {:?}", e);
+			}
 		}
 	}
 

@@ -19,7 +19,7 @@ use super::*;
 
 use alloc::vec;
 use frame_benchmarking::{account, v2::*, BenchmarkError};
-use frame_support::{assert_ok, pallet_prelude::Get};
+use frame_support::{assert_ok, pallet_prelude::Get, traits::OnPoll};
 use frame_system::RawOrigin as SystemOrigin;
 use individuality_support::traits::RI_ZERO;
 use sp_runtime::traits::AppendZerosInput;
@@ -439,10 +439,11 @@ mod benches {
 		assert!(PendingSuspensions::<T>::get(RI_ZERO).len() > (ring_size / 2) as usize);
 		assert!(PendingSuspensions::<T>::get(1).len() > (ring_size / 2) as usize);
 
-		assert_ok!(pallet::Pallet::<T>::migrate_keys(SystemOrigin::None.into(), None));
+		let mut meter = WeightMeter::new();
+		pallet::Pallet::<T>::migrate_keys(&mut meter);
 
-		assert_ok!(pallet::Pallet::<T>::remove_suspended_keys(SystemOrigin::None.into(), RI_ZERO));
-		assert_ok!(pallet::Pallet::<T>::remove_suspended_keys(SystemOrigin::None.into(), 1));
+		pallet::Pallet::<T>::remove_suspended_keys(RI_ZERO);
+		pallet::Pallet::<T>::remove_suspended_keys(1);
 
 		assert!(RingKeys::<T>::get(RI_ZERO).len() < (ring_size / 2) as usize);
 		assert!(RingKeys::<T>::get(1).len() < (ring_size / 2) as usize);
@@ -611,7 +612,7 @@ mod benches {
 	}
 
 	#[benchmark]
-	fn validate_unsigned_with_remove_suspended_keys(
+	fn remove_suspended_keys(
 		n: Linear<1, { T::MaxRingSize::get() }>,
 	) -> Result<(), BenchmarkError> {
 		prepare_chunks::<T>();
@@ -630,20 +631,15 @@ mod benches {
 		let suspensions: Vec<PersonalId> = (0..n as PersonalId).collect();
 		assert_ok!(pallet::Pallet::<T>::suspend_personhood(&suspensions));
 		assert_ok!(pallet::Pallet::<T>::end_people_set_mutation_session());
-		assert_ok!(pallet::Pallet::<T>::migrate_keys(SystemOrigin::None.into(), None));
+		let mut meter = WeightMeter::new();
+		pallet::Pallet::<T>::migrate_keys(&mut meter);
 
 		// To make sure they are indeed pending suspension
 		assert_eq!(PendingSuspensions::<T>::get(RI_ZERO).len(), n as usize);
 
 		#[block]
 		{
-			let call = Call::remove_suspended_keys { ring_index: RI_ZERO };
-			<pallet::Pallet<T> as ValidateUnsigned>::validate_unsigned(
-				TransactionSource::Local,
-				&call,
-			)
-			.map_err(|e| -> &'static str { e.into() })?;
-			call.dispatch_bypass_filter(RawOrigin::None.into())?;
+			pallet::Pallet::<T>::remove_suspended_keys(RI_ZERO);
 		}
 
 		// Pending suspensions are cleared for the ring
@@ -662,11 +658,10 @@ mod benches {
 	}
 
 	#[benchmark]
-	fn validate_unsigned_with_migrate_keys(
-		n: Linear<1, { T::MaxRingSize::get() }>,
-	) -> Result<(), BenchmarkError> {
+	fn migrate_keys_single_included_key() -> Result<(), BenchmarkError> {
 		prepare_chunks::<T>();
 
+		let max_members = T::MaxRingSize::get();
 		// Generate people and build a ring
 		let members = generate_members_for_ring::<T>(SEED);
 		recognize_people::<T>(&members);
@@ -674,7 +669,7 @@ mod benches {
 		assert_ok!(pallet::Pallet::<T>::build_ring(SystemOrigin::None.into(), RI_ZERO, None));
 
 		// Migrate 'n' number of people in the ring
-		for (personal_id, key) in (0..n as PersonalId)
+		for (personal_id, key) in (0..max_members as PersonalId)
 			.map(|i| new_member_from::<T>(u32::MAX - i as u32, SEED).1)
 			.enumerate()
 		{
@@ -686,27 +681,24 @@ mod benches {
 		assert_ok!(pallet::Pallet::<T>::start_people_set_mutation_session());
 		assert_ok!(pallet::Pallet::<T>::end_people_set_mutation_session());
 		assert!(PendingSuspensions::<T>::get(RI_ZERO).is_empty());
+		// All migrated keys are queued, but we only want one as this function benchmarks just one
+		// iteration of `migrate_keys`.
+		assert_eq!(KeyMigrationQueue::<T>::iter().count(), T::MaxRingSize::get() as usize);
+		let (first_id, first_key) = KeyMigrationQueue::<T>::iter().next().unwrap();
 
 		#[block]
 		{
-			let call = Call::migrate_keys { limit: Some(n) };
-			<pallet::Pallet<T> as ValidateUnsigned>::validate_unsigned(
-				TransactionSource::Local,
-				&call,
-			)
-			.map_err(|e| -> &'static str { e.into() })?;
-			call.dispatch_bypass_filter(RawOrigin::None.into())?;
+			assert_ok!(pallet::Pallet::<T>::migrate_keys_single_included_key(first_id, first_key));
 		}
 
 		// Pending suspensions are reflected in the ring status.
-		assert_eq!(PendingSuspensions::<T>::get(RI_ZERO).len(), n as usize);
-		assert!(KeyMigrationQueue::<T>::iter().next().is_none());
+		assert_eq!(PendingSuspensions::<T>::get(RI_ZERO).len(), 1);
 
 		Ok(())
 	}
 
 	#[benchmark]
-	fn validate_unsigned_with_merge_queue_pages() -> Result<(), BenchmarkError> {
+	fn merge_queue_pages() -> Result<(), BenchmarkError> {
 		prepare_chunks::<T>();
 
 		// Two pages exists: first is full, the second contains one member
@@ -724,15 +716,21 @@ mod benches {
 		});
 		assert_eq!(OnboardingQueue::<T>::get(0).len(), queue_page_size as usize - 1);
 
+		// Attempt to merge pages succeeds
+		let QueueMergeAction::Merge { initial_head, new_head, first_key_page, second_key_page } =
+			pallet::Pallet::<T>::should_merge_queue_pages()
+		else {
+			panic!("should be mergeable")
+		};
+
 		#[block]
 		{
-			let call = Call::merge_queue_pages {};
-			<pallet::Pallet<T> as ValidateUnsigned>::validate_unsigned(
-				TransactionSource::Local,
-				&call,
-			)
-			.map_err(|e| -> &'static str { e.into() })?;
-			call.dispatch_bypass_filter(RawOrigin::None.into())?;
+			pallet::Pallet::<T>::merge_queue_pages(
+				initial_head,
+				new_head,
+				first_key_page,
+				second_key_page,
+			);
 		}
 
 		// The queue pages have changed
@@ -740,6 +738,29 @@ mod benches {
 		assert!(OnboardingQueue::<T>::get(0).is_empty());
 		assert!(OnboardingQueue::<T>::get(1).is_full());
 
+		Ok(())
+	}
+
+	#[benchmark]
+	fn on_poll_base() -> Result<(), BenchmarkError> {
+		// Two pages exists: first is full, the second contains one member
+		let queue_page_size: u32 = <T as Config>::OnboardingQueuePageSize::get();
+		let members = generate_members::<T>(SEED, 0, queue_page_size + 1);
+		recognize_people::<T>(&members);
+
+		assert_eq!(QueuePageIndices::<T>::get(), (0, 1));
+		assert!(OnboardingQueue::<T>::get(0).is_full());
+		assert_eq!(OnboardingQueue::<T>::get(1).len(), 1);
+		assert!(RingsState::<T>::get().append_only());
+
+		let mut meter = WeightMeter::new();
+
+		#[block]
+		{
+			pallet::Pallet::<T>::on_poll(0u32.into(), &mut meter);
+		}
+
+		assert_eq!(meter.consumed(), T::WeightInfo::on_poll_base());
 		Ok(())
 	}
 

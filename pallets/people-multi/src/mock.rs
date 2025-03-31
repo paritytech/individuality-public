@@ -21,7 +21,7 @@ use crate::{
 };
 use frame_support::{
 	assert_ok, derive_impl, dispatch::DispatchErrorWithPostInfo, match_types, parameter_types,
-	storage::with_transaction,
+	storage::with_transaction, weights::RuntimeDbWeight,
 };
 
 use frame_system::{offchain::CreateTransactionBase, ChainContext};
@@ -30,7 +30,7 @@ use sp_runtime::{
 	testing::UintAuthorityId,
 	traits::{Applyable, BlakeTwo256, Checkable, IdentityLookup},
 	transaction_validity::{InvalidTransaction, TransactionSource, TransactionValidityError},
-	BuildStorage, DispatchError,
+	BuildStorage, DispatchError, Weight,
 };
 use verifiable::demo_impls::Simple;
 
@@ -54,12 +54,19 @@ frame_support::construct_runtime!(
 	}
 );
 
+parameter_types! {
+	pub const MockDbWeight: RuntimeDbWeight = RuntimeDbWeight {
+		read: 10,
+		write: 20,
+	};
+}
+
 #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
 impl frame_system::Config for Test {
 	type BaseCallFilter = frame_support::traits::Everything;
 	type BlockWeights = ();
 	type BlockLength = ();
-	type DbWeight = ();
+	type DbWeight = MockDbWeight;
 	type RuntimeOrigin = RuntimeOrigin;
 	type RuntimeCall = RuntimeCall;
 	type Nonce = u64;
@@ -105,8 +112,87 @@ match_types! {
 	};
 }
 
+pub struct MockWeights;
+impl crate::WeightInfo for MockWeights {
+	fn as_personal_identity() -> sp_runtime::Weight {
+		Weight::from_parts(1, 1)
+	}
+
+	fn as_personal_alias() -> sp_runtime::Weight {
+		Weight::from_parts(2, 2)
+	}
+
+	fn under_alias() -> sp_runtime::Weight {
+		Weight::from_parts(3, 3)
+	}
+
+	fn set_alias_account() -> sp_runtime::Weight {
+		Weight::from_parts(4, 4)
+	}
+
+	fn unset_alias_account() -> sp_runtime::Weight {
+		Weight::from_parts(5, 5)
+	}
+
+	fn reset_root() -> sp_runtime::Weight {
+		Weight::from_parts(6, 6)
+	}
+
+	fn force_recognize_personhood() -> sp_runtime::Weight {
+		Weight::from_parts(7, 7)
+	}
+
+	fn set_personal_id_account() -> sp_runtime::Weight {
+		Weight::from_parts(8, 8)
+	}
+
+	fn unset_personal_id_account() -> sp_runtime::Weight {
+		Weight::from_parts(9, 9)
+	}
+
+	fn set_onboarding_size() -> sp_runtime::Weight {
+		Weight::from_parts(10, 10)
+	}
+
+	fn merge_rings() -> sp_runtime::Weight {
+		Weight::from_parts(11, 11)
+	}
+
+	fn migrate_included_key() -> sp_runtime::Weight {
+		Weight::from_parts(12, 12)
+	}
+
+	fn migrate_onboarding_key() -> sp_runtime::Weight {
+		Weight::from_parts(13, 13)
+	}
+
+	fn validate_unsigned_with_build_ring(n: u32) -> sp_runtime::Weight {
+		Weight::from_parts(n as u64 * 14, n as u64 * 14)
+	}
+
+	fn validate_unsigned_with_onboard_people() -> sp_runtime::Weight {
+		Weight::from_parts(15, 15)
+	}
+
+	fn remove_suspended_people(n: u32) -> sp_runtime::Weight {
+		Weight::from_parts(n as u64 * 16, n as u64 * 16)
+	}
+
+	fn migrate_keys_single_included_key() -> sp_runtime::Weight {
+		Weight::from_parts(17, 17)
+	}
+
+	fn merge_queue_pages() -> sp_runtime::Weight {
+		Weight::from_parts(18, 18)
+	}
+
+	fn on_poll_base() -> sp_runtime::Weight {
+		Weight::from_parts(19, 19)
+	}
+}
+
 impl crate::Config for Test {
-	type WeightInfo = ();
+	type WeightInfo = MockWeights;
 	type RuntimeEvent = RuntimeEvent;
 	type Crypto = verifiable::demo_impls::Simple;
 	type AccountContexts = TestAccountContexts;

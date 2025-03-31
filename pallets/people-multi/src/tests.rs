@@ -19,16 +19,20 @@ use crate::{
 	extension::{AsPerson, AsPersonInfo},
 	mock::*,
 	pallet::{AccountToPersonalId, Origin as PeopleOrigin},
-	*,
+	WeightInfo, *,
 };
 use frame_support::{
 	assert_noop, assert_ok,
 	dispatch::Pays,
-	traits::{ExtrinsicCall, Get},
+	traits::{Get, OnIdle, OnPoll},
+	weights::RuntimeDbWeight,
 	BoundedVec,
 };
 use individuality_support::traits::RI_ZERO;
-use sp_runtime::transaction_validity::{InvalidTransaction, InvalidTransaction::BadSigner};
+use sp_runtime::{
+	transaction_validity::InvalidTransaction::{self, BadSigner},
+	Weight,
+};
 use verifiable::demo_impls::Simple;
 
 fn generate_people_with_index(
@@ -503,6 +507,7 @@ fn recognize_same_person_2_times() {
 #[test]
 fn recognize_person_with_duplicate_key_after_suspend() {
 	TestExt::new().execute_with(|| {
+		let mut meter = WeightMeter::new();
 		OnboardingSize::<Test>::set(1);
 
 		let person_a = PeoplePallet::reserve_new_id();
@@ -542,8 +547,8 @@ fn recognize_person_with_duplicate_key_after_suspend() {
 
 		// End suspensions.
 		assert_ok!(PeoplePallet::end_people_set_mutation_session());
-		assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
-		assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::signed(0), 0));
+		PeoplePallet::migrate_keys(&mut meter);
+		PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 		// Make sure both A and B are suspended.
 		assert_eq!(People::<Test>::get(person_a).unwrap().position, RingPosition::Suspended);
@@ -952,18 +957,11 @@ mod offchain_worker {
 			// Offchain worker is called
 			PeoplePallet::offchain_worker(0);
 
-			// 1 transaction is submitted
-			assert_eq!(state.read().transactions.len(), 1);
-
-			// and the transaction should be migrate_keys call
-			let transaction = state.write().transactions.pop().unwrap();
-			let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-			assert!(matches!(
-				ex.function,
-				crate::mock::RuntimeCall::PeoplePallet(crate::Call::migrate_keys { limit: _ },)
-			));
-			// The call gets dispatched
-			assert_ok!(ex.call().clone().dispatch(RuntimeOrigin::none()));
+			// No transaction is submitted
+			assert!(state.read().transactions.is_empty());
+			// Move past the key migration process
+			let mut meter = WeightMeter::new();
+			PeoplePallet::on_poll(0, &mut meter);
 			assert!(RingsState::<Test>::get().append_only());
 
 			// Mutation session is ongoing
@@ -1126,20 +1124,11 @@ mod offchain_worker {
 					// Offchain worker is called
 					PeoplePallet::offchain_worker(0);
 
-					// 1 transaction is submitted
-					assert_eq!(state.read().transactions.len(), 1);
-
-					// and the transaction should be migrate_keys call
-					let transaction = state.write().transactions.pop().unwrap();
-					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-					assert!(matches!(
-						ex.function,
-						crate::mock::RuntimeCall::PeoplePallet(crate::Call::migrate_keys {
-							limit: _
-						},)
-					));
-					// The call gets dispatched
-					assert_ok!(ex.call().clone().dispatch(RuntimeOrigin::none()));
+					// No transaction is submitted
+					assert!(state.read().transactions.is_empty());
+					// Close the key migration process.
+					let mut meter = WeightMeter::new();
+					PeoplePallet::on_poll(0, &mut meter);
 					assert!(RingsState::<Test>::get().append_only());
 
 					// Offchain worker is called
@@ -1148,18 +1137,19 @@ mod offchain_worker {
 					// 1 transaction is submitted
 					assert_eq!(state.read().transactions.len(), 1);
 
-					// and the transaction should be remove_suspended_keys call
+					// and it should be build_ring call for the ring where the suspensions were
+					// removed
 					let transaction = state.write().transactions.pop().unwrap();
 					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-					let (ring_index, suspended_indices) = match ex.function {
-						crate::mock::RuntimeCall::PeoplePallet(
-							crate::Call::remove_suspended_keys { ring_index },
-						) => (ring_index, suspended_indices_list(ring_index)),
+					let ring_index = match ex.function {
+						crate::mock::RuntimeCall::PeoplePallet(crate::Call::build_ring {
+							ring_index,
+							..
+						}) => ring_index,
 						e => panic!("Unexpected call: {:?}", e),
 					};
-					assert_eq!(ring_index, 0);
-					assert_eq!(suspended_indices.len(), 1);
-					assert_eq!(suspended_indices[0], 1);
+					assert_eq!(ring_index, RI_ZERO);
+					assert_eq!(RingKeys::<Test>::get(RI_ZERO).len(), 9)
 				});
 			});
 		}
@@ -1192,54 +1182,19 @@ mod offchain_worker {
 					// Offchain worker is called
 					PeoplePallet::offchain_worker(0);
 
-					// 1 transaction is submitted
-					assert_eq!(state.read().transactions.len(), 1);
-
-					// and the transaction should be migrate_keys call
-					let transaction = state.write().transactions.pop().unwrap();
-					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-					assert!(matches!(
-						ex.function,
-						crate::mock::RuntimeCall::PeoplePallet(crate::Call::migrate_keys {
-							limit: _
-						},)
-					));
-					// The call gets dispatched
-					assert_ok!(ex.call().clone().dispatch(RuntimeOrigin::none()));
+					// The keys are removed
+					let mut meter = WeightMeter::new();
+					PeoplePallet::on_poll(0, &mut meter);
 					assert!(RingsState::<Test>::get().append_only());
-
-					// Offchain worker is called
-					PeoplePallet::offchain_worker(0);
-
-					// 1 transaction is submitted
-					assert_eq!(state.read().transactions.len(), 1);
-
-					// and the transaction should be remove_suspended_keys call
-					let transaction = state.write().transactions.pop().unwrap();
-					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-					let (ring_index, suspended_indices) = match ex.function {
-						crate::mock::RuntimeCall::PeoplePallet(
-							crate::Call::remove_suspended_keys { ring_index },
-						) => (ring_index, suspended_indices_list(ring_index)),
-						e => panic!("Unexpected call: {:?}", e),
-					};
-
-					// and it should be for the ring with index 1
-					assert_eq!(ring_index, 1);
-					assert_eq!(suspended_indices.len(), 1);
-					assert_eq!(suspended_indices[0], 1);
-
-					// The call gets dispatched
-					assert_ok!(ex.call().clone().dispatch(RuntimeOrigin::none()));
 
 					// Offchain worker is called again
 					PeoplePallet::offchain_worker(0);
 
-					// 2 transactions is submitted
-					assert_eq!(state.read().transactions.len(), 2);
+					// 1 transactions is submitted
+					assert_eq!(state.read().transactions.len(), 1);
 
-					// and the 1st one should be build_ring call for the ring where the suspensions
-					// were removed
+					// and it should be build_ring call for the ring where the suspensions were
+					// removed
 					let transaction = state.write().transactions.pop().unwrap();
 					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
 					let ring_index = match ex.function {
@@ -1250,21 +1205,6 @@ mod offchain_worker {
 						e => panic!("Unexpected call: {:?}", e),
 					};
 					assert_eq!(ring_index, 1);
-
-					// and the 2nd one should be remove_suspended_keys call for the other ring
-					let transaction = state.write().transactions.pop().unwrap();
-					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-					let (ring_index, suspended_indices) = match ex.function {
-						crate::mock::RuntimeCall::PeoplePallet(
-							crate::Call::remove_suspended_keys { ring_index },
-						) => (ring_index, suspended_indices_list(RI_ZERO)),
-						e => panic!("Unexpected call: {:?}", e),
-					};
-
-					// and it should be for the ring with index 0
-					assert_eq!(ring_index, 0);
-					assert_eq!(suspended_indices.len(), 1);
-					assert_eq!(suspended_indices[0], 1);
 				});
 			});
 		}
@@ -1349,32 +1289,6 @@ mod validate_unsigned {
 			assert_ok!(PeoplePallet::validate_unsigned(
 				TransactionSource::Local,
 				&onboard_people_call
-			));
-		});
-	}
-
-	#[test]
-	fn works_for_remove_suspended_keys() {
-		TestExt::new().execute_with(|| {
-			// Set-up needed to make the call pass
-			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-
-			// Suspend and remove more than half of the people in both rings
-			assert_ok!(PeoplePallet::start_people_set_mutation_session());
-			let suspensions: &[PersonalId] = &[1];
-			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
-			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
-
-			// remove_suspended_keys call should succeed
-			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1]);
-			let remove_suspended_keys_call =
-				Call::<Test>::remove_suspended_keys { ring_index: RI_ZERO };
-			assert_ok!(PeoplePallet::validate_unsigned(
-				TransactionSource::Local,
-				&remove_suspended_keys_call
 			));
 		});
 	}
@@ -1581,6 +1495,7 @@ mod merge_rings {
 	#[test]
 	fn fails_if_one_of_rings_has_pending_suspensions() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// Two rings exist
 			generate_people_with_index(0, 19);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1594,15 +1509,15 @@ mod merge_rings {
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5, 6]);
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::migrate_keys(&mut meter);
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			// Suspend a few more people in the first ring
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			let suspensions: &[PersonalId] = &[7, 8];
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// The current ring has a higher index than the ones being merged
 			CurrentRingIndex::<Test>::set(14);
@@ -1617,6 +1532,7 @@ mod merge_rings {
 	#[test]
 	fn moves_all_keys_from_target_ring_to_base_ring() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// Two rings exist
 			generate_people_with_index(0, 19);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1631,10 +1547,10 @@ mod merge_rings {
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5, 6]);
 			assert_eq!(suspended_indices_list(1).into_inner(), vec![1, 2, 3, 4, 5, 6]);
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), 1));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
+			PeoplePallet::remove_suspended_keys(1);
 
 			// The current ring has a higher index than the ones being merged
 			CurrentRingIndex::<Test>::set(14);
@@ -1684,6 +1600,7 @@ mod suspensions {
 	#[test]
 	fn suspending_personhood_marks_people_as_suspended() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1694,7 +1611,7 @@ mod suspensions {
 			let suspensions: &[PersonalId] = &[1];
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// Makes the person's record suspended
 			let personal_record = People::<Test>::get(1);
@@ -1710,10 +1627,7 @@ mod suspensions {
 	fn suspended_people_removal_fails_if_session_started() {
 		TestExt::new().execute_with(|| {
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
-			assert_noop!(
-				PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO),
-				Error::<Test>::InvalidSuspensions
-			);
+			assert!(!PeoplePallet::should_remove_suspended_keys(RI_ZERO, true));
 		});
 	}
 
@@ -1722,26 +1636,21 @@ mod suspensions {
 		TestExt::new().execute_with(|| {
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_noop!(
-				PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO),
-				Error::<Test>::InvalidSuspensions
-			);
+			assert!(!PeoplePallet::should_remove_suspended_keys(RI_ZERO, true));
 		});
 	}
 
 	#[test]
 	fn suspended_people_removal_fails_if_no_suspensions_recorded_in_ring() {
 		TestExt::new().execute_with(|| {
-			assert_noop!(
-				PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO),
-				Error::<Test>::InvalidSuspensions
-			);
+			assert!(!PeoplePallet::should_remove_suspended_keys(RI_ZERO, true));
 		});
 	}
 
 	#[test]
 	fn suspended_people_removal_modifies_ring_data() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1753,11 +1662,11 @@ mod suspensions {
 			let suspensions: &[PersonalId] = &[1];
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// Attempt to remove suspended people succeeds
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1]);
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			// Ring data becomes modified
 			assert_eq!(RingKeysStatus::<Test>::get(RI_ZERO), RingStatus { included: 0, total: 9 });
@@ -1772,6 +1681,7 @@ mod suspensions {
 	#[test]
 	fn suspending_in_multiple_sessions() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with multiple people
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1781,23 +1691,23 @@ mod suspensions {
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			assert_ok!(PeoplePallet::suspend_personhood(&[1, 2]));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// Those people are then removed
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2]);
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			// Second session: some more people become suspended
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			assert_ok!(PeoplePallet::suspend_personhood(&[3, 4]));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// Pending suspensions are tracked correctly
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3, 4]);
 
 			// Those extra people are removed too
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			// Final ring state is correct
 			assert_eq!(RingKeys::<Test>::get(RI_ZERO).len(), 6);
@@ -1807,6 +1717,7 @@ mod suspensions {
 	#[test]
 	fn suspending_personhood_then_resume() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1817,7 +1728,7 @@ mod suspensions {
 			let suspensions: &[PersonalId] = &[1];
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// Makes the person's record suspended
 			let personal_record = People::<Test>::get(1);
@@ -1830,7 +1741,7 @@ mod suspensions {
 			// Still needs to remove a key.
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1]);
 
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
 			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
 		});
@@ -1839,6 +1750,7 @@ mod suspensions {
 	#[test]
 	fn suspending_person_removes_associated_data() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with multiple people
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1858,14 +1770,14 @@ mod suspensions {
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			assert_ok!(PeoplePallet::suspend_personhood(&[person_id]));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// Account to personal id is removed
 			assert!(AccountToPersonalId::<Test>::get(account_id).is_none());
 
 			// The person is removed
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![person_id as u32]);
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			// Account to personal id stays removed
 			assert!(AccountToPersonalId::<Test>::get(account_id).is_none());
@@ -1949,6 +1861,7 @@ mod key_migration {
 	#[test]
 	fn migrate_key_fails_for_suspended_person() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -1959,11 +1872,11 @@ mod key_migration {
 			let suspensions: &[PersonalId] = &[3];
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			// Attempt to remove suspended people succeeds
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			assert!(matches!(People::<Test>::get(3).unwrap().position, RingPosition::Suspended));
 			let new_secret = Simple::new_secret([100; 32]);
@@ -2119,6 +2032,7 @@ mod key_migration {
 	#[test]
 	fn migrate_keys_mutates_record() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -2143,7 +2057,7 @@ mod key_migration {
 			// Handle migrations
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			assert_eq!(Keys::<Test>::get(public1).unwrap(), 3);
 			let new_record = People::<Test>::get(3).unwrap();
@@ -2160,7 +2074,7 @@ mod key_migration {
 			// Handle migrations
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			assert_eq!(Keys::<Test>::get(public2).unwrap(), 4);
 			let new_record = People::<Test>::get(4).unwrap();
@@ -2173,6 +2087,7 @@ mod key_migration {
 	#[test]
 	fn migrate_keys_before_suspension() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -2195,21 +2110,15 @@ mod key_migration {
 			assert_eq!(KeyMigrationQueue::<Test>::get(3).unwrap(), public1);
 
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
-			assert_noop!(
-				PeoplePallet::migrate_keys(RuntimeOrigin::none(), None),
-				Error::<Test>::NoKeyMigrationSession
-			);
+			assert!(!RingsState::<Test>::get().key_migration());
 			// Handle migrations
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
-			assert_noop!(
-				PeoplePallet::migrate_keys(RuntimeOrigin::none(), None),
-				Error::<Test>::NoKeyMigrationSession
-			);
+			assert!(!RingsState::<Test>::get().key_migration());
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
 			assert_ok!(PeoplePallet::suspend_personhood(&[3]));
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
 
 			// Migrate another key without removing the other key.
@@ -2219,15 +2128,12 @@ mod key_migration {
 			assert_ok!(PeoplePallet::migrate_included_key(origin, public2));
 
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
-			assert_noop!(
-				PeoplePallet::migrate_keys(RuntimeOrigin::none(), None),
-				Error::<Test>::NoKeyMigrationSession
-			);
+			assert!(!RingsState::<Test>::get().key_migration());
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
 			assert_ok!(PeoplePallet::suspend_personhood(&[4]));
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3, 4]);
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3, 4]);
 		});
 	}
@@ -2235,6 +2141,7 @@ mod key_migration {
 	#[test]
 	fn migrate_keys_after_suspension() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -2260,16 +2167,13 @@ mod key_migration {
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			assert_ok!(PeoplePallet::suspend_personhood(&[3]));
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
-			assert_noop!(
-				PeoplePallet::migrate_keys(RuntimeOrigin::none(), None),
-				Error::<Test>::NoKeyMigrationSession
-			);
+			assert!(!RingsState::<Test>::get().key_migration());
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
 
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
 
 			let secret2 = Simple::new_secret([101; 32]);
@@ -2284,6 +2188,7 @@ mod key_migration {
 	#[test]
 	fn migrate_key_and_remove_it() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -2307,16 +2212,13 @@ mod key_migration {
 
 			// Handle migrations
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
-			assert_noop!(
-				PeoplePallet::migrate_keys(RuntimeOrigin::none(), None),
-				Error::<Test>::NoKeyMigrationSession
-			);
+			assert!(!RingsState::<Test>::get().key_migration());
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
 
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
 			assert_eq!(RingKeys::<Test>::get(0).len(), 9);
 			assert!(!RingKeys::<Test>::get(0)
@@ -2328,6 +2230,7 @@ mod key_migration {
 	#[test]
 	fn migrate_and_suspend_keys_then_remove_them() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
 			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
@@ -2372,7 +2275,7 @@ mod key_migration {
 			);
 
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 			assert_eq!(
 				suspended_indices_list(RI_ZERO).len(),
 				migrated_people.len() + suspensions.len()
@@ -2380,7 +2283,7 @@ mod key_migration {
 
 			let suspended_indices = suspended_indices_list(RI_ZERO);
 			assert!(&suspended_indices[..].windows(2).all(|pair| pair[0] < pair[1]));
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
 			let current_keys = RingKeys::<Test>::get(0).into_inner();
 			assert_eq!(current_keys.len(), static_people.len());
@@ -2418,6 +2321,7 @@ mod onboard_people {
 	#[test]
 	fn fails_if_ring_contains_suspended_members() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			OnboardingSize::<Test>::set(5);
 
 			// A ring with people exists
@@ -2430,19 +2334,25 @@ mod onboard_people {
 			let suspensions: &[PersonalId] = &[1, 2, 3];
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+			let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+			let end_migrate_db_weight = db_weight.reads_writes(2, 1);
+			let mut expected_consumed = end_migrate_db_weight;
+			assert_eq!(meter.consumed(), expected_consumed);
 
 			// and are removed from the ring
 			let suspended_indices = vec![1, 2, 3];
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), suspended_indices);
-			assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), RI_ZERO,));
+			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			// One more person becomes suspended
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			let suspensions: &[PersonalId] = &[4];
 			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+			expected_consumed += end_migrate_db_weight;
+			assert_eq!(meter.consumed(), expected_consumed);
 
 			// More people are awaiting onboarding
 			generate_people_with_index(10, 22);
@@ -2626,6 +2536,7 @@ mod onboard_people {
 	#[test]
 	fn awaiting_people_in_between_rings_boundaries() {
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			// 3 rings with 9/10 people exists
 			generate_people_with_index(1, 30);
 			for _ in 1..=3 {
@@ -2639,10 +2550,13 @@ mod onboard_people {
 			let suspensions: Vec<PersonalId> = vec![1, 11, 21];
 			assert_ok!(PeoplePallet::suspend_personhood(&suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
 
 			for ring_index in 0..=2 {
-				assert_ok!(PeoplePallet::remove_suspended_keys(RuntimeOrigin::none(), ring_index,));
+				assert_eq!(
+					PeoplePallet::remove_suspended_keys(ring_index),
+					<Test as Config>::WeightInfo::remove_suspended_people(10)
+				);
 			}
 
 			for ring_index in 0..=2 {
@@ -2824,6 +2738,7 @@ mod onboard_people {
 		let people_to_onboard = queue_page_size * 4;
 		let onboarding_size = 5;
 		TestExt::new().execute_with(|| {
+			let mut meter = WeightMeter::new();
 			crate::OnboardingSize::<Test>::set(onboarding_size);
 			// Enough people in the queue to fill multiple pages
 			generate_people_with_index(1, people_to_onboard as u8);
@@ -2847,7 +2762,10 @@ mod onboard_people {
 				.extend(2 + queue_page_size as PersonalId..2u64 * queue_page_size as PersonalId);
 			assert_ok!(PeoplePallet::suspend_personhood(&suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+			let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+			let end_migrate_db_weight = db_weight.reads_writes(2, 1);
+			assert_eq!(meter.consumed(), end_migrate_db_weight);
 
 			assert_eq!(OnboardingQueue::<Test>::get(0).len(), 3);
 			assert_eq!(OnboardingQueue::<Test>::get(1).len(), 2);
@@ -2887,10 +2805,7 @@ mod merge_queue_pages {
 	#[test]
 	fn fails_if_queue_empty() {
 		TestExt::new().execute_with(|| {
-			assert_noop!(
-				PeoplePallet::merge_queue_pages(RuntimeOrigin::none()),
-				Error::<Test>::QueueStable
-			);
+			assert!(matches!(PeoplePallet::should_merge_queue_pages(), QueueMergeAction::NoAction));
 		});
 	}
 
@@ -2898,10 +2813,7 @@ mod merge_queue_pages {
 	fn fails_if_only_one_page_exists() {
 		TestExt::new().execute_with(|| {
 			generate_people_with_index(0, 8);
-			assert_noop!(
-				PeoplePallet::merge_queue_pages(RuntimeOrigin::none()),
-				Error::<Test>::QueueStable
-			);
+			assert!(matches!(PeoplePallet::should_merge_queue_pages(), QueueMergeAction::NoAction));
 		});
 	}
 
@@ -2910,6 +2822,7 @@ mod merge_queue_pages {
 		TestExt::new().execute_with(|| {
 			// Two full pages exist
 			let queue_size: u32 = <Test as Config>::OnboardingQueuePageSize::get();
+			let mut meter = WeightMeter::new();
 			generate_people_with_index(1, queue_size as u8 * 2);
 
 			// Half of the people become suspended in the first page
@@ -2917,7 +2830,11 @@ mod merge_queue_pages {
 			let first_page_suspensions: Vec<PersonalId> = (1..20).collect();
 			assert_ok!(PeoplePallet::suspend_personhood(&first_page_suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+
+			let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+			let end_migrate_db_weight = db_weight.reads_writes(2, 1);
+			assert_eq!(meter.consumed(), end_migrate_db_weight);
 
 			// Half of the people minus one become suspended in the second page
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -2926,10 +2843,7 @@ mod merge_queue_pages {
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
 
 			// Attempt to merge pages fails
-			assert_noop!(
-				PeoplePallet::merge_queue_pages(RuntimeOrigin::none()),
-				Error::<Test>::QueueStable
-			);
+			assert!(matches!(PeoplePallet::should_merge_queue_pages(), QueueMergeAction::NoAction));
 		});
 	}
 
@@ -2938,6 +2852,7 @@ mod merge_queue_pages {
 		TestExt::new().execute_with(|| {
 			// Two full pages exist
 			let queue_size: u32 = <Test as Config>::OnboardingQueuePageSize::get();
+			let mut meter = WeightMeter::new();
 			generate_people_with_index(1, queue_size as u8 * 2);
 
 			// So the queue has two full pages in it
@@ -2950,17 +2865,33 @@ mod merge_queue_pages {
 			let first_page_suspensions: Vec<PersonalId> = (0..19).collect();
 			assert_ok!(PeoplePallet::suspend_personhood(&first_page_suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+			let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+			let end_migrate_db_weight = db_weight.reads_writes(2, 1);
+			let mut expected_consumed = end_migrate_db_weight;
+			assert_eq!(meter.consumed(), expected_consumed);
 
 			// More than half of the people become suspended in the second page
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			let second_page_suspensions: Vec<PersonalId> = (40..61).collect();
 			assert_ok!(PeoplePallet::suspend_personhood(&second_page_suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+			expected_consumed += end_migrate_db_weight;
+			assert_eq!(meter.consumed(), expected_consumed);
 
 			// Attempt to merge pages succeeds
-			assert_ok!(PeoplePallet::merge_queue_pages(RuntimeOrigin::none()));
+			let QueueMergeAction::Merge { initial_head, new_head, first_key_page, second_key_page } =
+				PeoplePallet::should_merge_queue_pages()
+			else {
+				panic!("should be mergeable")
+			};
+			PeoplePallet::merge_queue_pages(
+				initial_head,
+				new_head,
+				first_key_page,
+				second_key_page,
+			);
 
 			// The queue pages have changed
 			assert_eq!(QueuePageIndices::<Test>::get(), (1, 1));
@@ -2992,6 +2923,7 @@ mod merge_queue_pages {
 		TestExt::new().execute_with(|| {
 			// Three full pages exist
 			let queue_size: u32 = <Test as Config>::OnboardingQueuePageSize::get();
+			let mut meter = WeightMeter::new();
 			generate_people_with_index(1, queue_size as u8 * 3);
 
 			// So the queue has three full pages in it
@@ -3005,17 +2937,33 @@ mod merge_queue_pages {
 			let first_page_suspensions: Vec<PersonalId> = (0..19).collect();
 			assert_ok!(PeoplePallet::suspend_personhood(&first_page_suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+			let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+			let end_migrate_db_weight = db_weight.reads_writes(2, 1);
+			let mut expected_consumed = end_migrate_db_weight;
+			assert_eq!(meter.consumed(), expected_consumed);
 
 			// More than half of the people become suspended in the second page
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			let second_page_suspensions: Vec<PersonalId> = (40..61).collect();
 			assert_ok!(PeoplePallet::suspend_personhood(&second_page_suspensions));
 			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-			assert_ok!(PeoplePallet::migrate_keys(RuntimeOrigin::none(), None));
+			PeoplePallet::migrate_keys(&mut meter);
+			expected_consumed += end_migrate_db_weight;
+			assert_eq!(meter.consumed(), expected_consumed);
 
 			// Attempt to merge pages succeeds
-			assert_ok!(PeoplePallet::merge_queue_pages(RuntimeOrigin::none()));
+			let QueueMergeAction::Merge { initial_head, new_head, first_key_page, second_key_page } =
+				PeoplePallet::should_merge_queue_pages()
+			else {
+				panic!("should be mergeable")
+			};
+			PeoplePallet::merge_queue_pages(
+				initial_head,
+				new_head,
+				first_key_page,
+				second_key_page,
+			);
 
 			// The queue pages have changed
 			assert_eq!(QueuePageIndices::<Test>::get(), (1, 2));
@@ -3067,6 +3015,289 @@ fn test_revision_in_tx_ext_as_alias_account() {
 		// Fail to alias account with outdated revision
 		let call = frame_system::Call::remark { remark: vec![] };
 		assert_noop!(exec_as_alias_tx(alias_account, call), BadSigner);
+	});
+}
+
+mod poll {
+	use super::*;
+
+	#[test]
+	fn on_poll_migrates_keys() {
+		new_test_ext().execute_with(|| {
+			// A ring with people exists
+			generate_people_with_index(0, 9);
+			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+
+			for i in 0..5 {
+				let new_secret = Simple::new_secret([100 + i; 32]);
+				let new_public = Simple::member_from_secret(&new_secret);
+				let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(i as PersonalId));
+				assert_ok!(PeoplePallet::migrate_included_key(origin, new_public));
+				assert_eq!(KeyMigrationQueue::<Test>::get(i as PersonalId).unwrap(), new_public);
+			}
+			let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+			let db_weight = db_weight.reads_writes(1, 1);
+			let base_weight = <<Test as Config>::WeightInfo as crate::WeightInfo>::on_poll_base();
+			let step_migration_weight =
+			<<Test as Config>::WeightInfo as crate::WeightInfo>::migrate_keys_single_included_key()
+				.saturating_add(db_weight);
+
+			assert_ok!(PeoplePallet::start_people_set_mutation_session());
+			assert_ok!(PeoplePallet::end_people_set_mutation_session());
+
+			let mut meter = WeightMeter::with_limit(base_weight);
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(KeyMigrationQueue::<Test>::iter().count(), 5);
+			assert!(RingsState::<Test>::get().key_migration());
+
+			let mut meter = WeightMeter::with_limit(base_weight + step_migration_weight);
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(KeyMigrationQueue::<Test>::iter().count(), 4);
+			assert!(RingsState::<Test>::get().key_migration());
+
+			let mut meter =
+				WeightMeter::with_limit(base_weight + step_migration_weight.saturating_mul(4));
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(KeyMigrationQueue::<Test>::iter().count(), 0);
+			assert!(RingsState::<Test>::get().key_migration());
+
+			let mut meter = WeightMeter::with_limit(base_weight + step_migration_weight);
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(KeyMigrationQueue::<Test>::iter().count(), 0);
+			assert!(RingsState::<Test>::get().append_only());
+			let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+			// 1R + 1W on `RingsState` for the state transition, 1R for `KeyMigrationQueue`.
+			let db_weight = db_weight.reads_writes(2, 1);
+			assert_eq!(meter.consumed(), base_weight + db_weight);
+		});
+	}
+
+	#[test]
+	fn on_poll_removes_stale_keys_once() {
+		new_test_ext().execute_with(|| {
+			OnboardingSize::<Test>::put(1);
+			// First ring full, 10 people
+			// Second ring with 8 people
+			generate_people_with_index(0, 17);
+			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+
+			assert_ok!(PeoplePallet::start_people_set_mutation_session());
+			let suspensions: &[PersonalId] = &[1, 2, 3, 4, 5, 11, 12, 13, 14, 15];
+			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
+			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5]);
+			assert_eq!(suspended_indices_list(1).into_inner(), vec![1, 2, 3, 4, 5]);
+			assert_ok!(PeoplePallet::end_people_set_mutation_session());
+			RingsState::<Test>::put(RingMembersState::AppendOnly);
+
+			let base_weight = <<Test as Config>::WeightInfo as crate::WeightInfo>::on_poll_base();
+			let step_remove_keys_weight =
+				<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(
+					<Test as Config>::MaxRingSize::get(),
+				);
+
+			let mut meter = WeightMeter::with_limit(base_weight);
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5]);
+			assert_eq!(suspended_indices_list(1).into_inner(), vec![1, 2, 3, 4, 5]);
+
+			let mut meter = WeightMeter::new();
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(PendingSuspensions::<Test>::iter().count(), 1);
+
+			let mut actual_consumed = meter.consumed();
+			let mut meter = WeightMeter::with_limit(base_weight + step_remove_keys_weight);
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(PendingSuspensions::<Test>::iter().count(), 0);
+			actual_consumed += meter.consumed();
+			assert_eq!(
+			actual_consumed,
+			base_weight
+				.saturating_mul(2)
+				.saturating_add(
+					<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(
+						10,
+					)
+				)
+				.saturating_add(
+					<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(8)
+				)
+		);
+		});
+	}
+
+	#[test]
+	fn on_poll_merges_queue_pages() {
+		new_test_ext().execute_with(|| {
+			// Two full pages exist
+			let queue_size: u32 = <Test as Config>::OnboardingQueuePageSize::get();
+			let mut meter = WeightMeter::new();
+			generate_people_with_index(1, queue_size as u8 * 2);
+
+			// So the queue has two full pages in it
+			assert_eq!(QueuePageIndices::<Test>::get(), (0, 1));
+			assert!(OnboardingQueue::<Test>::get(0).is_full());
+			assert!(OnboardingQueue::<Test>::get(1).is_full());
+
+			// Half of the people become suspended in the first page
+			assert_ok!(PeoplePallet::start_people_set_mutation_session());
+			let first_page_suspensions: Vec<PersonalId> = (0..19).collect();
+			assert_ok!(PeoplePallet::suspend_personhood(&first_page_suspensions));
+			assert_ok!(PeoplePallet::end_people_set_mutation_session());
+			PeoplePallet::migrate_keys(&mut meter);
+
+			// More than half of the people become suspended in the second page
+			assert_ok!(PeoplePallet::start_people_set_mutation_session());
+			let second_page_suspensions: Vec<PersonalId> = (40..61).collect();
+			assert_ok!(PeoplePallet::suspend_personhood(&second_page_suspensions));
+			assert_ok!(PeoplePallet::end_people_set_mutation_session());
+			PeoplePallet::migrate_keys(&mut meter);
+
+			assert!(matches!(
+				PeoplePallet::should_merge_queue_pages(),
+				QueueMergeAction::Merge { .. }
+			));
+			let base_weight = <<Test as Config>::WeightInfo as crate::WeightInfo>::on_poll_base();
+			let merge_pages_weight =
+				<<Test as Config>::WeightInfo as crate::WeightInfo>::merge_queue_pages();
+
+			// Not enough weight
+			let mut meter = WeightMeter::with_limit(base_weight);
+			PeoplePallet::on_poll(0, &mut meter);
+			assert_eq!(QueuePageIndices::<Test>::get(), (0, 1));
+
+			// Give it enough weight
+			let mut meter = WeightMeter::with_limit(base_weight + merge_pages_weight);
+			PeoplePallet::on_poll(0, &mut meter);
+
+			// The queue pages have changed
+			assert_eq!(QueuePageIndices::<Test>::get(), (1, 1));
+			assert!(OnboardingQueue::<Test>::get(0).is_empty());
+			let page = OnboardingQueue::<Test>::get(1);
+			assert!(page.is_full());
+		});
+	}
+}
+
+#[test]
+fn on_poll_works() {
+	new_test_ext().execute_with(|| {
+		let queue_size: u32 = <Test as Config>::OnboardingQueuePageSize::get();
+		let ring_size: u32 = <Test as Config>::MaxRingSize::get();
+		OnboardingSize::<Test>::put(1);
+		generate_people_with_index(1, 2 * ring_size as u8 + 2 * queue_size as u8);
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+		// 20 in rings 1 and 2, onboarding pages [20, 40, 20]
+		assert_eq!(QueuePageIndices::<Test>::get(), (0, 2));
+
+		for i in 0..5 {
+			let new_secret = Simple::new_secret([250 + i; 32]);
+			let new_public = Simple::member_from_secret(&new_secret);
+			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(i as PersonalId));
+			assert_ok!(PeoplePallet::migrate_included_key(origin, new_public));
+			assert_eq!(KeyMigrationQueue::<Test>::get(i as PersonalId).unwrap(), new_public);
+		}
+
+		assert_ok!(PeoplePallet::start_people_set_mutation_session());
+		let suspensions: &[PersonalId] = &[1, 2, 3, 4, 5, 11, 12, 13, 14, 15];
+		assert_ok!(PeoplePallet::suspend_personhood(suspensions));
+		assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5]);
+		assert_eq!(suspended_indices_list(1).into_inner(), vec![1, 2, 3, 4, 5]);
+		let second_page_suspensions: Vec<PersonalId> = (41..61).collect();
+		assert_ok!(PeoplePallet::suspend_personhood(&second_page_suspensions));
+		assert_ok!(PeoplePallet::end_people_set_mutation_session());
+		assert_eq!(QueuePageIndices::<Test>::get(), (0, 2));
+
+		// Give it enough weight
+		let mut meter = WeightMeter::new();
+		PeoplePallet::on_poll(0, &mut meter);
+
+		assert_eq!(KeyMigrationQueue::<Test>::iter().count(), 0);
+		assert!(RingsState::<Test>::get().append_only());
+
+		assert_eq!(PendingSuspensions::<Test>::iter().count(), 1);
+
+		assert_eq!(QueuePageIndices::<Test>::get(), (1, 2));
+		assert!(OnboardingQueue::<Test>::get(0).is_empty());
+		let page = OnboardingQueue::<Test>::get(1);
+		assert!(page.is_full());
+
+		let db_weight: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
+		let migrate_db_weight = db_weight.reads_writes(1, 1);
+		let end_migrate_db_weight = db_weight.reads_writes(2, 1);
+		let base_weight = <<Test as Config>::WeightInfo as crate::WeightInfo>::on_poll_base();
+		let step_migration_weight =
+			<<Test as Config>::WeightInfo as crate::WeightInfo>::migrate_keys_single_included_key()
+				.saturating_add(migrate_db_weight);
+		let step_remove_keys_weight =
+			<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(ring_size);
+		let merge_pages_weight =
+			<<Test as Config>::WeightInfo as crate::WeightInfo>::merge_queue_pages();
+
+		let expected_consumed = base_weight +
+			step_migration_weight.saturating_mul(5) +
+			end_migrate_db_weight +
+			step_remove_keys_weight +
+			merge_pages_weight;
+		assert_eq!(meter.consumed(), expected_consumed);
+	});
+}
+
+#[test]
+fn on_idle_works() {
+	new_test_ext().execute_with(|| {
+		OnboardingSize::<Test>::put(1);
+		// First ring full, 10 people
+		// Second ring full, 10 people
+		// Third ring with 8 people
+		generate_people_with_index(0, 27);
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 2, None));
+
+		assert_ok!(PeoplePallet::start_people_set_mutation_session());
+		let suspensions: &[PersonalId] = &[1, 2, 3, 4, 5, 11, 12, 13, 14, 15, 21, 22, 23, 24, 25];
+		assert_ok!(PeoplePallet::suspend_personhood(suspensions));
+		assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5]);
+		assert_eq!(suspended_indices_list(1).into_inner(), vec![1, 2, 3, 4, 5]);
+		assert_eq!(suspended_indices_list(2).into_inner(), vec![1, 2, 3, 4, 5]);
+		assert_ok!(PeoplePallet::end_people_set_mutation_session());
+		RingsState::<Test>::put(RingMembersState::AppendOnly);
+
+		let poll_base_weight = <<Test as Config>::WeightInfo as crate::WeightInfo>::on_poll_base();
+		let step_remove_keys_weight =
+			<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(
+				<Test as Config>::MaxRingSize::get(),
+			);
+		let idle_step_weight = step_remove_keys_weight;
+
+		assert_eq!(PeoplePallet::on_idle(0, Weight::zero()), Weight::zero());
+		assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5]);
+		assert_eq!(suspended_indices_list(1).into_inner(), vec![1, 2, 3, 4, 5]);
+		assert_eq!(suspended_indices_list(2).into_inner(), vec![1, 2, 3, 4, 5]);
+
+		let mut meter =
+			WeightMeter::with_limit(poll_base_weight + step_remove_keys_weight.saturating_mul(3));
+		PeoplePallet::on_poll(0, &mut meter);
+		assert_eq!(PendingSuspensions::<Test>::iter().count(), 2);
+		assert_eq!(meter.consumed(), poll_base_weight.saturating_add(step_remove_keys_weight));
+		let actual_idle_weight = PeoplePallet::on_idle(0, idle_step_weight.saturating_mul(2));
+		assert_eq!(PendingSuspensions::<Test>::iter().count(), 0);
+		assert_eq!(
+			actual_idle_weight,
+			step_remove_keys_weight.saturating_add(
+				<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(8)
+			)
+		);
 	});
 }
 
