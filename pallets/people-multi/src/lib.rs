@@ -1789,8 +1789,6 @@ pub mod pallet {
 	impl<T: Config> AddOnlyPeopleTrait for Pallet<T> {
 		type Member = MemberOf<T>;
 
-		type Signature = SignatureOf<T>;
-
 		fn reserve_new_id() -> PersonalId {
 			let new_id = NextPersonalId::<T>::mutate(|id| {
 				let new_id = *id;
@@ -1825,16 +1823,6 @@ pub mod pallet {
 				Some(key) => Self::do_insert_key(who, key),
 				None => Self::resume_personhood(who),
 			}
-		}
-
-		fn verify_signature(signer: PersonalId, msg: &[u8], signature: &Self::Signature) -> bool {
-			People::<T>::get(signer).is_some_and(|record| {
-				<<T as Config>::Crypto as GenerateVerifiable>::verify_signature(
-					signature,
-					msg,
-					&record.key,
-				)
-			})
 		}
 
 		#[cfg(feature = "runtime-benchmarks")]
