@@ -1853,6 +1853,10 @@ pub mod pallet {
 		fn suspend_personhood(suspensions: &[PersonalId]) -> DispatchResult {
 			Self::queue_personhood_suspensions(suspensions)
 		}
+		fn can_start_people_set_mutation_session() -> bool {
+			let current_state = RingsState::<T>::get();
+			current_state.start_mutation_session().is_ok()
+		}
 		fn start_people_set_mutation_session() -> DispatchResult {
 			let current_state = RingsState::<T>::get();
 			RingsState::<T>::put(
