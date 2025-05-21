@@ -31,7 +31,7 @@ use frame_support::{
 use individuality_support::traits::RI_ZERO;
 use sp_runtime::{
 	transaction_validity::InvalidTransaction::{self, BadSigner},
-	Weight,
+	DispatchResult, Weight,
 };
 use verifiable::demo_impls::Simple;
 
@@ -58,15 +58,21 @@ fn suspended_indices_list(ring_index: u32) -> BoundedVec<u32, <Test as Config>::
 	suspended_indices
 }
 
+fn build_ring(ring_index: RingIndex, limit: Option<u32>) -> DispatchResult {
+	let to_include = PeoplePallet::should_build_ring(
+		ring_index,
+		limit.unwrap_or(<Test as Config>::MaxRingSize::get()),
+	)
+	.ok_or(Error::<Test>::StillFresh)?;
+	PeoplePallet::build_ring(ring_index, to_include)
+}
+
 #[test]
 fn build_ring_works() {
 	TestExt::new().execute_with(|| {
 		PeoplePallet::set_onboarding_size(RuntimeOrigin::root(), 5).unwrap();
 		// No one to onboard.
-		assert_noop!(
-			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None),
-			Error::<Test>::StillFresh
-		);
+		assert_noop!(build_ring(RI_ZERO, None), Error::<Test>::StillFresh);
 
 		// Not enough for a queue
 		generate_people_with_index(0, 3);
@@ -74,49 +80,40 @@ fn build_ring_works() {
 		// People are recognized but not onboarded yet, the ring has 0 members, same as initial
 		// value.
 		assert_eq!(Keys::<Test>::count(), 4);
-		assert_noop!(
-			PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None),
-			Error::<Test>::StillFresh
-		);
+		assert_noop!(build_ring(RI_ZERO, None), Error::<Test>::StillFresh);
 
 		// Onboard people
-		assert_noop!(
-			PeoplePallet::onboard_people(RuntimeOrigin::none()),
-			Error::<Test>::Incomplete
-		);
+		assert_noop!(PeoplePallet::onboard_people(), Error::<Test>::Incomplete);
 
 		// Now we have enough to build one.
 		generate_people_with_index(4, 4);
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::onboard_people());
 
 		// There isn't a root yet.
 		assert!(!Root::<Test>::contains_key(0));
 		assert_eq!(RingKeysStatus::<Test>::get(0), RingStatus { total: 5, included: 0 });
 		// Build the root.
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+		assert_ok!(build_ring(RI_ZERO, None));
 		assert!(Root::<Test>::contains_key(0));
 
 		// We can add 5 more people
 		generate_people_with_index(5, 9);
 
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(RI_ZERO, None));
 
 		// We can add 26 more people
 		generate_people_with_index(10, 35);
 
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(1, None));
 
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 2, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(2, None));
 
 		// Can't build 3, because then there are only 4 spots left which is less than onboarding
 		// size of 5
-		assert_noop!(
-			PeoplePallet::onboard_people(RuntimeOrigin::none()),
-			Error::<Test>::Incomplete
-		);
+		assert_noop!(PeoplePallet::onboard_people(), Error::<Test>::Incomplete);
 	});
 }
 
@@ -522,7 +519,7 @@ fn recognize_person_with_duplicate_key_after_suspend() {
 		// Recognize person A and B
 		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_a)));
 		// Onboard A so that they become part of a ring.
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+		assert_ok!(PeoplePallet::onboard_people());
 		// B will be part of the onboarding queue.
 		assert_ok!(PeoplePallet::recognize_personhood(person_b, Some(key_b)));
 
@@ -872,130 +869,21 @@ fn test_as_personal_identity_with_account_check_and_nonce() {
 	});
 }
 
-mod offchain_worker {
+mod on_idle {
 	use super::*;
-	use frame_support::{pallet_prelude::Get, traits::OffchainWorker, BoundedVec};
-	use sp_core::offchain::{
-		testing::{TestOffchainExt, TestTransactionPoolExt},
-		OffchainDbExt, OffchainWorkerExt, TransactionPoolExt,
-	};
-
-	#[test]
-	fn submits_build_ring_transaction_only_at_interval_ticks() {
-		let mut ext = new_test_ext();
-		let (offchain, _state) = TestOffchainExt::new();
-		let (pool, state) = TestTransactionPoolExt::new();
-		ext.register_extension(OffchainDbExt::new(offchain.clone()));
-		ext.register_extension(OffchainWorkerExt::new(offchain));
-		ext.register_extension(TransactionPoolExt::new(pool));
-
-		ext.execute_with(|| {
-			// Only one new member is required to build the ring
-			OnboardingSize::<Test>::set(1);
-
-			// 5 members already exist in the ring and none of them is included
-			let member_keys = (0..5)
-				.map(|i| Simple::member_from_secret(&Simple::new_secret([i as u8; 32])))
-				.collect::<Vec<_>>();
-			let keys: BoundedVec<MemberOf<Test>, <Test as Config>::MaxRingSize> =
-				BoundedVec::try_from(member_keys).expect("failed to init members");
-			let ring_status = RingStatus { total: keys.len().saturated_into(), included: 0 };
-			RingKeys::<Test>::insert(0, keys.clone());
-			RingKeysStatus::<Test>::insert(0, ring_status);
-
-			// Offchain worker should not submit the transaction
-			// if the block numbers are in between the interval so
-			// starting from block number 1 to T::RingBakingInterval - 1
-			let interval: u64 = <Test as Config>::RingBakingInterval::get();
-			let mut block = 1;
-			while block < interval {
-				System::set_block_number(block);
-				PeoplePallet::offchain_worker(block);
-				assert_eq!(state.read().transactions.len(), 0);
-				block += 1;
-			}
-
-			// At T::RingBakingInterval the offchain worker should submit the transaction
-			System::set_block_number(block);
-			PeoplePallet::offchain_worker(block);
-			assert_eq!(state.read().transactions.len(), 1);
-
-			// and the transaction should be build_ring call
-			let transaction = state.write().transactions.pop().unwrap();
-			let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-			let ring_index = match ex.function {
-				crate::mock::RuntimeCall::PeoplePallet(crate::Call::build_ring {
-					ring_index,
-					..
-				}) => ring_index,
-				e => panic!("Unexpected call: {:?}", e),
-			};
-			assert_eq!(ring_index, 0);
-		});
-	}
-
-	#[test]
-	fn no_transaction_submitted_if_ring_doesnt_exist() {
-		let mut ext = new_test_ext();
-		let (offchain, _state) = TestOffchainExt::new();
-		let (pool, state) = TestTransactionPoolExt::new();
-		ext.register_extension(OffchainDbExt::new(offchain.clone()));
-		ext.register_extension(OffchainWorkerExt::new(offchain));
-		ext.register_extension(TransactionPoolExt::new(pool));
-
-		ext.execute_with(|| {
-			// A ring exists with some suspensions
-			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-
-			assert_ok!(PeoplePallet::start_people_set_mutation_session());
-			let suspensions: &[PersonalId] = &[1];
-			assert_ok!(PeoplePallet::suspend_personhood(suspensions));
-			assert_ok!(PeoplePallet::end_people_set_mutation_session());
-
-			// Offchain worker is called
-			PeoplePallet::offchain_worker(0);
-
-			// No transaction is submitted
-			assert!(state.read().transactions.is_empty());
-			// Move past the key migration process
-			let mut meter = WeightMeter::new();
-			PeoplePallet::on_poll(0, &mut meter);
-			assert!(RingsState::<Test>::get().append_only());
-
-			// Mutation session is ongoing
-			assert_ok!(PeoplePallet::start_people_set_mutation_session());
-
-			// Offchain worker is called
-			PeoplePallet::offchain_worker(0);
-
-			// No transactions are submitted
-			assert_eq!(state.read().transactions.len(), 0);
-		});
-	}
+	use frame_support::assert_storage_noop;
 
 	#[test]
 	fn one_ring_and_no_suspensions() {
 		TestExt::new().execute_with(|| {
 			let mut ext = new_test_ext();
-			let (offchain, _state) = TestOffchainExt::new();
-			let (pool, state) = TestTransactionPoolExt::new();
-			ext.register_extension(OffchainDbExt::new(offchain.clone()));
-			ext.register_extension(OffchainWorkerExt::new(offchain));
-			ext.register_extension(TransactionPoolExt::new(pool));
-
 			ext.execute_with(|| {
 				// A ring exists but no-one in it is suspended
 				generate_people_with_index(0, 9);
-				assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-				assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+				assert_ok!(PeoplePallet::onboard_people());
+				assert_ok!(build_ring(RI_ZERO, None));
 
-				// Offchain worker is called
-				PeoplePallet::offchain_worker(0);
-
-				// No transactions are submitted
-				assert_eq!(state.read().transactions.len(), 0);
+				assert_storage_noop!(PeoplePallet::on_idle(0, Weight::MAX));
 			});
 		});
 	}
@@ -1004,17 +892,8 @@ mod offchain_worker {
 	fn no_rings_and_empty_queue() {
 		TestExt::new().execute_with(|| {
 			let mut ext = new_test_ext();
-			let (offchain, _state) = TestOffchainExt::new();
-			let (pool, state) = TestTransactionPoolExt::new();
-			ext.register_extension(OffchainDbExt::new(offchain.clone()));
-			ext.register_extension(OffchainWorkerExt::new(offchain));
-			ext.register_extension(TransactionPoolExt::new(pool));
-
 			ext.execute_with(|| {
-				// Offchain worker is called
-				PeoplePallet::offchain_worker(0);
-				// No transactions are submitted
-				assert_eq!(state.read().transactions.len(), 0);
+				assert_storage_noop!(PeoplePallet::on_idle(0, Weight::MAX));
 			});
 		});
 	}
@@ -1023,64 +902,18 @@ mod offchain_worker {
 	fn no_rings_and_not_enough_people_in_the_queue() {
 		TestExt::new().execute_with(|| {
 			let mut ext = new_test_ext();
-			let (offchain, _state) = TestOffchainExt::new();
-			let (pool, state) = TestTransactionPoolExt::new();
-			ext.register_extension(OffchainDbExt::new(offchain.clone()));
-			ext.register_extension(OffchainWorkerExt::new(offchain));
-			ext.register_extension(TransactionPoolExt::new(pool));
-
 			ext.execute_with(|| {
 				// Several people are awaiting in the queue
 				generate_people_with_index(0, 3);
-
-				// Offchain worker is called
-				PeoplePallet::offchain_worker(0);
-
-				// No transactions are submitted
-				assert_eq!(state.read().transactions.len(), 0);
+				assert_storage_noop!(PeoplePallet::on_idle(0, Weight::MAX));
 			});
 		});
 	}
 
-	// TODO: move to onboarding offchain worker
-	// #[test]
-	// fn no_transaction_submitted_if_not_included_too_small() {
-	// 	let mut ext = new_test_ext();
-	// 	let (offchain, _state) = TestOffchainExt::new();
-	// 	let (pool, state) = TestTransactionPoolExt::new();
-	// 	ext.register_extension(OffchainDbExt::new(offchain.clone()));
-	// 	ext.register_extension(OffchainWorkerExt::new(offchain));
-	// 	ext.register_extension(TransactionPoolExt::new(pool));
-
-	// 	ext.execute_with(|| {
-	// 		// Only one new member is required to build the ring
-	// 		OnboardingSize::<Test>::set(2);
-
-	// 		// 1 member exists in the ring and is not included
-	// 		let member_keys = vec![Simple::member_from_secret(&Simple::new_secret([0u8; 32]))];
-	// 		let keys: BoundedVec<MemberOf<Test>, <Test as Config>::MaxRingSize> =
-	// 			BoundedVec::try_from(member_keys).expect("failed to init members");
-	// 		let ring_status =
-	// 			RingStatus { total: keys.len().saturated_into(), included: 0, suspended: 0 };
-	// 		RingKeys::<Test>::insert(0, keys.clone());
-	// 		RingKeysStatus::<Test>::insert(0, ring_status);
-
-	// 		let block = 0;
-	// 		System::set_block_number(block);
-	// 		PeoplePallet::offchain_worker(block);
-	// 		assert_eq!(state.read().transactions.len(), 0);
-	// 	});
-	// }
 	#[test]
 	fn no_rings_and_some_people_awaiting_onboarding() {
 		TestExt::new().execute_with(|| {
 			let mut ext = new_test_ext();
-			let (offchain, _state) = TestOffchainExt::new();
-			let (pool, state) = TestTransactionPoolExt::new();
-			ext.register_extension(OffchainDbExt::new(offchain.clone()));
-			ext.register_extension(OffchainWorkerExt::new(offchain));
-			ext.register_extension(TransactionPoolExt::new(pool));
-
 			ext.execute_with(|| {
 				// Several people are awaiting in the queue
 				generate_people_with_index(0, 3);
@@ -1088,11 +921,7 @@ mod offchain_worker {
 				// Mutation session is ongoing
 				assert_ok!(PeoplePallet::start_people_set_mutation_session());
 
-				// Offchain worker is called
-				PeoplePallet::offchain_worker(0);
-
-				// No transactions are submitted
-				assert_eq!(state.read().transactions.len(), 0);
+				assert_storage_noop!(PeoplePallet::on_idle(0, Weight::MAX));
 			});
 		});
 	}
@@ -1104,52 +933,28 @@ mod offchain_worker {
 		fn one_ring_with_suspensions() {
 			TestExt::new().execute_with(|| {
 				let mut ext = new_test_ext();
-				let (offchain, _state) = TestOffchainExt::new();
-				let (pool, state) = TestTransactionPoolExt::new();
-				ext.register_extension(OffchainDbExt::new(offchain.clone()));
-				ext.register_extension(OffchainWorkerExt::new(offchain));
-				ext.register_extension(TransactionPoolExt::new(pool));
-
 				ext.execute_with(|| {
 					// A ring exists with some suspensions
 					generate_people_with_index(0, 9);
-					assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-					assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+					assert_ok!(PeoplePallet::onboard_people());
+					assert_ok!(build_ring(RI_ZERO, None));
 
 					assert_ok!(PeoplePallet::start_people_set_mutation_session());
 					let suspensions: &[PersonalId] = &[1];
 					assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 					assert_ok!(PeoplePallet::end_people_set_mutation_session());
 
-					// Offchain worker is called
-					PeoplePallet::offchain_worker(0);
-
-					// No transaction is submitted
-					assert!(state.read().transactions.is_empty());
 					// Close the key migration process.
 					let mut meter = WeightMeter::new();
 					PeoplePallet::on_poll(0, &mut meter);
 					assert!(RingsState::<Test>::get().append_only());
+					PeoplePallet::on_idle(0, Weight::MAX);
 
-					// Offchain worker is called
-					PeoplePallet::offchain_worker(0);
-
-					// 1 transaction is submitted
-					assert_eq!(state.read().transactions.len(), 1);
-
-					// and it should be build_ring call for the ring where the suspensions were
-					// removed
-					let transaction = state.write().transactions.pop().unwrap();
-					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-					let ring_index = match ex.function {
-						crate::mock::RuntimeCall::PeoplePallet(crate::Call::build_ring {
-							ring_index,
-							..
-						}) => ring_index,
-						e => panic!("Unexpected call: {:?}", e),
-					};
-					assert_eq!(ring_index, RI_ZERO);
-					assert_eq!(RingKeys::<Test>::get(RI_ZERO).len(), 9)
+					assert_eq!(RingKeys::<Test>::get(RI_ZERO).len(), 9);
+					assert_eq!(
+						RingKeysStatus::<Test>::get(RI_ZERO),
+						RingStatus { total: 9, included: 9 }
+					);
 				});
 			});
 		}
@@ -1158,53 +963,47 @@ mod offchain_worker {
 		fn multiple_rings_with_suspensions() {
 			TestExt::new().execute_with(|| {
 				let mut ext = new_test_ext();
-				let (offchain, _state) = TestOffchainExt::new();
-				let (pool, state) = TestTransactionPoolExt::new();
-				ext.register_extension(OffchainDbExt::new(offchain.clone()));
-				ext.register_extension(OffchainWorkerExt::new(offchain));
-				ext.register_extension(TransactionPoolExt::new(pool));
-
 				ext.execute_with(|| {
 					//
 
 					// Two rings exist with some suspensions
 					generate_people_with_index(0, 19);
-					assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-					assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-					assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-					assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+					assert_ok!(PeoplePallet::onboard_people());
+					assert_ok!(PeoplePallet::onboard_people());
+					assert_ok!(build_ring(RI_ZERO, None));
+					assert_ok!(build_ring(1, None));
 
 					assert_ok!(PeoplePallet::start_people_set_mutation_session());
 					let suspensions: &[PersonalId] = &[1, 11];
 					assert_ok!(PeoplePallet::suspend_personhood(suspensions));
 					assert_ok!(PeoplePallet::end_people_set_mutation_session());
 
-					// Offchain worker is called
-					PeoplePallet::offchain_worker(0);
-
 					// The keys are removed
 					let mut meter = WeightMeter::new();
 					PeoplePallet::on_poll(0, &mut meter);
 					assert!(RingsState::<Test>::get().append_only());
 
-					// Offchain worker is called again
-					PeoplePallet::offchain_worker(0);
-
-					// 1 transactions is submitted
-					assert_eq!(state.read().transactions.len(), 1);
-
-					// and it should be build_ring call for the ring where the suspensions were
-					// removed
-					let transaction = state.write().transactions.pop().unwrap();
-					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
-					let ring_index = match ex.function {
-						crate::mock::RuntimeCall::PeoplePallet(crate::Call::build_ring {
-							ring_index,
-							..
-						}) => ring_index,
-						e => panic!("Unexpected call: {:?}", e),
-					};
-					assert_eq!(ring_index, 1);
+					// Ring should be built here
+					PeoplePallet::on_idle(0, Weight::MAX);
+					// Rings were built
+					assert!(PeoplePallet::should_build_ring(
+						RI_ZERO,
+						<Test as Config>::MaxRingSize::get()
+					)
+					.is_none());
+					assert_eq!(
+						RingKeysStatus::<Test>::get(RI_ZERO),
+						RingStatus { total: 9, included: 9 }
+					);
+					assert!(PeoplePallet::should_build_ring(
+						1,
+						<Test as Config>::MaxRingSize::get()
+					)
+					.is_none());
+					assert_eq!(
+						RingKeysStatus::<Test>::get(1),
+						RingStatus { total: 9, included: 9 }
+					);
 				});
 			});
 		}
@@ -1214,15 +1013,9 @@ mod offchain_worker {
 		use super::*;
 
 		#[test]
-		fn sends_tx_if_all_conditions_met() {
+		fn onboarding_all_conditions_met() {
 			TestExt::new().execute_with(|| {
 				let mut ext = new_test_ext();
-				let (offchain, _state) = TestOffchainExt::new();
-				let (pool, state) = TestTransactionPoolExt::new();
-				ext.register_extension(OffchainDbExt::new(offchain.clone()));
-				ext.register_extension(OffchainWorkerExt::new(offchain));
-				ext.register_extension(TransactionPoolExt::new(pool));
-
 				ext.execute_with(|| {
 					PeoplePallet::set_onboarding_size(RuntimeOrigin::root(), 3).unwrap();
 					OnboardingSize::<Test>::set(3);
@@ -1230,18 +1023,32 @@ mod offchain_worker {
 					// Several people are awaiting in the queue
 					generate_people_with_index(0, 3);
 
-					// Offchain worker is called
-					PeoplePallet::offchain_worker(0);
+					assert_storage_noop!(PeoplePallet::on_idle(
+						0,
+						<Test as Config>::WeightInfo::on_idle_base(),
+					));
 
-					// 1 transaction is submitted
-					assert_eq!(state.read().transactions.len(), 1);
+					assert_storage_noop!(PeoplePallet::on_idle(
+						0,
+						<Test as Config>::WeightInfo::on_idle_base().saturating_mul(2),
+					));
 
-					// and the transaction should be onboard_people call
-					let transaction = state.write().transactions.pop().unwrap();
-					let ex: Extrinsic = Decode::decode(&mut &*transaction).unwrap();
+					let expected_weight = <Test as Config>::WeightInfo::on_idle_base()
+						.saturating_add(<Test as Config>::WeightInfo::onboard_people());
 					assert_eq!(
-						ex.function,
-						crate::mock::RuntimeCall::PeoplePallet(crate::Call::onboard_people {})
+						PeoplePallet::on_idle(
+							0,
+							<Test as Config>::WeightInfo::on_idle_base()
+								.saturating_add(<Test as Config>::WeightInfo::onboard_people())
+								.saturating_mul(2),
+						),
+						expected_weight
+					);
+
+					// People were onboarded but not included
+					assert_eq!(
+						RingKeysStatus::<Test>::get(RI_ZERO),
+						RingStatus { total: 4, included: 0 }
 					);
 				});
 			});
@@ -1249,13 +1056,9 @@ mod offchain_worker {
 	}
 }
 
-mod validate_unsigned {
+mod manual_tasks {
 	use super::*;
 	use frame_support::BoundedVec;
-	use sp_runtime::{
-		traits::ValidateUnsigned,
-		transaction_validity::{InvalidTransaction, TransactionSource},
-	};
 
 	#[test]
 	fn works_for_build_ring() {
@@ -1270,11 +1073,11 @@ mod validate_unsigned {
 			RingKeysStatus::<Test>::insert(RI_ZERO, ring_status);
 
 			// build_ring call should succeed
-			let build_ring_call = Call::<Test>::build_ring {
-				ring_index: 0,
-				limit: Some(OnboardingSize::<Test>::get()),
-			};
-			assert_ok!(PeoplePallet::validate_unsigned(TransactionSource::Local, &build_ring_call));
+			assert_ok!(PeoplePallet::build_ring_manual(
+				RuntimeOrigin::signed(0),
+				0,
+				Some(OnboardingSize::<Test>::get())
+			));
 		});
 	}
 
@@ -1284,46 +1087,25 @@ mod validate_unsigned {
 			// Set-up needed to make the call pass
 			generate_people_with_index(0, 19);
 
-			// onboard_people call should succeed
-			let onboard_people_call = Call::<Test>::onboard_people {};
-			assert_ok!(PeoplePallet::validate_unsigned(
-				TransactionSource::Local,
-				&onboard_people_call
-			));
-		});
-	}
-
-	#[test]
-	fn fails_for_other_calls() {
-		TestExt::new().execute_with(|| {
-			let force_recognize_call = Call::<Test>::force_recognize_personhood { people: vec![] };
-			assert_eq!(
-				PeoplePallet::validate_unsigned(TransactionSource::Local, &force_recognize_call),
-				InvalidTransaction::Call.into()
-			);
-
-			let set_onboarding_size_call = Call::<Test>::set_onboarding_size { onboarding_size: 1 };
-			assert_eq!(
-				PeoplePallet::validate_unsigned(
-					TransactionSource::Local,
-					&set_onboarding_size_call
-				),
-				InvalidTransaction::Call.into()
-			);
+			// onboard_people_manual call should succeed
+			assert_ok!(PeoplePallet::onboard_people_manual(RuntimeOrigin::signed(0)));
 		});
 	}
 
 	#[test]
 	fn checks_the_need_to_build_the_ring() {
 		TestExt::new().execute_with(|| {
-			let valid_call = Call::<Test>::build_ring {
-				ring_index: 0,
-				limit: Some(OnboardingSize::<Test>::get()),
-			};
-			assert_eq!(
-				PeoplePallet::validate_unsigned(TransactionSource::Local, &valid_call),
-				InvalidTransaction::Stale.into()
-			);
+			OnboardingSize::<Test>::set(5);
+			assert!(PeoplePallet::should_build_ring(0, OnboardingSize::<Test>::get()).is_none());
+
+			// Set-up some people but not enough
+			generate_people_with_index(0, 3);
+			assert!(PeoplePallet::should_build_ring(0, OnboardingSize::<Test>::get()).is_none());
+
+			// Set-up needed to make the call pass
+			generate_people_with_index(4, 4);
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_eq!(PeoplePallet::should_build_ring(0, OnboardingSize::<Test>::get()), Some(5));
 		});
 	}
 }
@@ -1472,10 +1254,10 @@ mod merge_rings {
 		TestExt::new().execute_with(|| {
 			// Two rings exist
 			generate_people_with_index(0, 19);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
+			assert_ok!(build_ring(1, None));
 
 			// The current ring has a higher index than the ones being merged
 			CurrentRingIndex::<Test>::set(14);
@@ -1498,10 +1280,10 @@ mod merge_rings {
 			let mut meter = WeightMeter::new();
 			// Two rings exist
 			generate_people_with_index(0, 19);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
+			assert_ok!(build_ring(1, None));
 
 			// Suspend and remove more than half of the people in the first ring
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1535,10 +1317,10 @@ mod merge_rings {
 			let mut meter = WeightMeter::new();
 			// Two rings exist
 			generate_people_with_index(0, 19);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
+			assert_ok!(build_ring(1, None));
 
 			// Suspend and remove more than half of the people in both rings
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1584,8 +1366,8 @@ mod suspensions {
 		TestExt::new().execute_with(|| {
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			// Attempt to suspend a person fails
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1603,8 +1385,8 @@ mod suspensions {
 			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			// Attempt to suspend a person
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1653,8 +1435,8 @@ mod suspensions {
 			let mut meter = WeightMeter::new();
 			// A ring exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 			let initial_root = Root::<Test>::get(RI_ZERO).unwrap();
 
 			// One person becomes suspended
@@ -1684,8 +1466,8 @@ mod suspensions {
 			let mut meter = WeightMeter::new();
 			// A ring with multiple people
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			// First session: some people become suspended
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1720,8 +1502,8 @@ mod suspensions {
 			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			// Attempt to suspend a person
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1743,7 +1525,7 @@ mod suspensions {
 
 			PeoplePallet::remove_suspended_keys(RI_ZERO);
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(build_ring(RI_ZERO, None));
 		});
 	}
 
@@ -1753,8 +1535,8 @@ mod suspensions {
 			let mut meter = WeightMeter::new();
 			// A ring with multiple people
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			// A person associated with an account
 			let person_id = 0;
@@ -1818,8 +1600,8 @@ mod key_migration {
 		TestExt::new().execute_with(|| {
 			// A ring with people exists
 			generate_people_with_index(0, 19);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let record3 = People::<Test>::get(3).unwrap();
 			let record13 = People::<Test>::get(13).unwrap();
@@ -1864,8 +1646,8 @@ mod key_migration {
 			let mut meter = WeightMeter::new();
 			// A ring exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			// One person becomes suspended
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1894,8 +1676,8 @@ mod key_migration {
 		TestExt::new().execute_with(|| {
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let initial_record = People::<Test>::get(3).unwrap();
 			assert!(matches!(
@@ -1953,8 +1735,8 @@ mod key_migration {
 		TestExt::new().execute_with(|| {
 			// A ring with people exists
 			generate_people_with_index(0, 19);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let initial_record = People::<Test>::get(13).unwrap();
 			assert!(matches!(initial_record.position, RingPosition::Onboarding { queue_page: 0 }));
@@ -1991,8 +1773,8 @@ mod key_migration {
 		TestExt::new().execute_with(|| {
 			// A ring with people exists
 			generate_people_with_index(0, 19);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let new_secret = Simple::new_secret([100; 32]);
 			let new_public = Simple::member_from_secret(&new_secret);
@@ -2035,8 +1817,8 @@ mod key_migration {
 			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let initial_record = People::<Test>::get(3).unwrap();
 			assert!(matches!(
@@ -2090,8 +1872,8 @@ mod key_migration {
 			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let initial_record = People::<Test>::get(3).unwrap();
 			assert!(matches!(
@@ -2144,8 +1926,8 @@ mod key_migration {
 			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let initial_record = People::<Test>::get(3).unwrap();
 			assert!(matches!(
@@ -2191,8 +1973,8 @@ mod key_migration {
 			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			let initial_record = People::<Test>::get(3).unwrap();
 			assert!(matches!(
@@ -2233,8 +2015,8 @@ mod key_migration {
 			let mut meter = WeightMeter::new();
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			for personal_id in 0..10 {
 				assert_eq!(
@@ -2311,10 +2093,7 @@ mod onboard_people {
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 
 			// Attempt to onboard people fails
-			assert_noop!(
-				PeoplePallet::onboard_people(RuntimeOrigin::none()),
-				Error::<Test>::Incomplete
-			);
+			assert_noop!(PeoplePallet::onboard_people(), Error::<Test>::Incomplete);
 		});
 	}
 
@@ -2326,8 +2105,8 @@ mod onboard_people {
 
 			// A ring with people exists
 			generate_people_with_index(0, 4);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			// Several people become suspended
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -2358,20 +2137,14 @@ mod onboard_people {
 			generate_people_with_index(10, 22);
 
 			// Attempt to build on that same ring fails
-			assert_noop!(
-				PeoplePallet::onboard_people(RuntimeOrigin::none()),
-				Error::<Test>::Incomplete
-			);
+			assert_noop!(PeoplePallet::onboard_people(), Error::<Test>::Incomplete);
 		});
 	}
 
 	#[test]
 	fn no_keys_in_queue() {
 		TestExt::new().execute_with(|| {
-			assert_noop!(
-				PeoplePallet::onboard_people(RuntimeOrigin::none()),
-				Error::<Test>::Incomplete
-			);
+			assert_noop!(PeoplePallet::onboard_people(), Error::<Test>::Incomplete);
 		});
 	}
 
@@ -2384,10 +2157,7 @@ mod onboard_people {
 			generate_people_with_index(0, 3);
 
 			// Onboarding attempt fails
-			assert_noop!(
-				PeoplePallet::onboard_people(RuntimeOrigin::none()),
-				Error::<Test>::Incomplete
-			);
+			assert_noop!(PeoplePallet::onboard_people(), Error::<Test>::Incomplete);
 		});
 	}
 
@@ -2398,7 +2168,7 @@ mod onboard_people {
 			generate_people_with_index(0, 9);
 
 			// Onboarding attempt succeeds
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::onboard_people());
 
 			// Keys are removed from the onboarding queue
 			let queue = OnboardingQueue::<Test>::get(RI_ZERO);
@@ -2432,15 +2202,15 @@ mod onboard_people {
 
 			// A ring with people exists
 			generate_people_with_index(0, 4);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 			assert!(Root::<Test>::get(RI_ZERO).is_some());
 
 			// Several people are awaiting onboarding
 			generate_people_with_index(5, 9);
 
 			// Onboarding attempt succeeds
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::onboard_people());
 
 			// Newcomers are included in the same ring
 			assert!(Root::<Test>::get(RI_ZERO + 1).is_none());
@@ -2476,7 +2246,7 @@ mod onboard_people {
 			// Each call to onboard people should onboard OnboardingSize number of keys
 			// which is equal to the number of rings to build
 			for _ in 0..=expected_rings_to_build - 1 {
-				assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+				assert_ok!(PeoplePallet::onboard_people());
 			}
 
 			// Keys are removed from the onboarding queue
@@ -2507,7 +2277,7 @@ mod onboard_people {
 
 			// When build_ring calls are executed
 			for ring_index in 0..=expected_rings_to_build - 1 {
-				assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), ring_index, None));
+				assert_ok!(build_ring(ring_index, None));
 
 				// Ring related storage items change
 				assert!(Root::<Test>::get(ring_index).is_some());
@@ -2540,10 +2310,10 @@ mod onboard_people {
 			// 3 rings with 9/10 people exists
 			generate_people_with_index(1, 30);
 			for _ in 1..=3 {
-				assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+				assert_ok!(PeoplePallet::onboard_people());
 			}
 			for ring_index in 0..=2 {
-				assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), ring_index, None));
+				assert_ok!(build_ring(ring_index, None));
 			}
 
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -2560,7 +2330,7 @@ mod onboard_people {
 			}
 
 			for ring_index in 0..=2 {
-				assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), ring_index, None));
+				assert_ok!(build_ring(ring_index, None));
 
 				assert!(Root::<Test>::get(ring_index).is_some());
 				assert_eq!(RingKeys::<Test>::get(ring_index).len(), 9);
@@ -2574,7 +2344,7 @@ mod onboard_people {
 			generate_people_with_index(31, 40);
 			assert_eq!(OnboardingQueue::<Test>::get(0).len(), 10);
 
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::onboard_people());
 			assert_eq!(OnboardingQueue::<Test>::get(0).len(), 0);
 
 			// Previous rings stay intact
@@ -2614,7 +2384,7 @@ mod onboard_people {
 			let onboarding_size: u32 = OnboardingSize::<Test>::get();
 			let expected_rings_to_build: u32 = people_to_onboard as u32 / onboarding_size;
 			for _ in 0..=expected_rings_to_build - 1 {
-				assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+				assert_ok!(PeoplePallet::onboard_people());
 			}
 
 			// Head should have overflown and wrapped around
@@ -2639,7 +2409,7 @@ mod onboard_people {
 			);
 
 			for _ in 0..=expected_rings_to_build - 1 {
-				assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+				assert_ok!(PeoplePallet::onboard_people());
 			}
 			assert_eq!(head, 0);
 			assert_eq!(tail, 2);
@@ -2666,7 +2436,7 @@ mod onboard_people {
 			assert_eq!(OnboardingQueue::<Test>::get(2).len(), queue_page_size as usize);
 
 			// Onboard people call succeeds
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::onboard_people());
 
 			// Members added
 			assert_eq!(ActiveMembers::<Test>::get(), queue_page_size * 2);
@@ -2702,7 +2472,7 @@ mod onboard_people {
 			assert_eq!(tail, 3);
 
 			// Another onboard people call
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::onboard_people());
 
 			// Members added
 			assert_eq!(ActiveMembers::<Test>::get(), queue_page_size * 4);
@@ -2778,7 +2548,7 @@ mod onboard_people {
 			assert_eq!(tail, 3);
 
 			// Onboard people call succeeds
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
+			assert_ok!(PeoplePallet::onboard_people());
 
 			// Members added
 			assert_eq!(ActiveMembers::<Test>::get(), onboarding_size);
@@ -2998,8 +2768,8 @@ fn test_revision_in_tx_ext_as_alias_account() {
 		// Setup
 		crate::OnboardingSize::<Test>::set(1);
 		let (_, pk, sk) = generate_people_with_index(0, 0).pop().unwrap();
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 0, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(0, None));
 		let alias_account = 37;
 		setup_alias_account(&pk, &sk, MOCK_CONTEXT, alias_account);
 
@@ -3026,8 +2796,8 @@ mod poll {
 		new_test_ext().execute_with(|| {
 			// A ring with people exists
 			generate_people_with_index(0, 9);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
 
 			for i in 0..5 {
 				let new_secret = Simple::new_secret([100 + i; 32]);
@@ -3080,10 +2850,10 @@ mod poll {
 			// First ring full, 10 people
 			// Second ring with 8 people
 			generate_people_with_index(0, 17);
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-			assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(PeoplePallet::onboard_people());
+			assert_ok!(build_ring(RI_ZERO, None));
+			assert_ok!(build_ring(1, None));
 
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
 			let suspensions: &[PersonalId] = &[1, 2, 3, 4, 5, 11, 12, 13, 14, 15];
@@ -3189,10 +2959,10 @@ fn on_poll_works() {
 		let ring_size: u32 = <Test as Config>::MaxRingSize::get();
 		OnboardingSize::<Test>::put(1);
 		generate_people_with_index(1, 2 * ring_size as u8 + 2 * queue_size as u8);
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(RI_ZERO, None));
+		assert_ok!(build_ring(1, None));
 		// 20 in rings 1 and 2, onboarding pages [20, 40, 20]
 		assert_eq!(QueuePageIndices::<Test>::get(), (0, 2));
 
@@ -3257,12 +3027,12 @@ fn on_idle_works() {
 		// Second ring full, 10 people
 		// Third ring with 8 people
 		generate_people_with_index(0, 27);
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), RI_ZERO, None));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 1, None));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 2, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(RI_ZERO, None));
+		assert_ok!(build_ring(1, None));
+		assert_ok!(build_ring(2, None));
 
 		assert_ok!(PeoplePallet::start_people_set_mutation_session());
 		let suspensions: &[PersonalId] = &[1, 2, 3, 4, 5, 11, 12, 13, 14, 15, 21, 22, 23, 24, 25];
@@ -3274,10 +3044,13 @@ fn on_idle_works() {
 		RingsState::<Test>::put(RingMembersState::AppendOnly);
 
 		let poll_base_weight = <<Test as Config>::WeightInfo as crate::WeightInfo>::on_poll_base();
+		let idle_base_weight = <<Test as Config>::WeightInfo as crate::WeightInfo>::on_idle_base();
 		let step_remove_keys_weight =
 			<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(
 				<Test as Config>::MaxRingSize::get(),
 			);
+		let step_pending_suspensions_weight =
+			<<Test as Config>::WeightInfo as crate::WeightInfo>::pending_suspensions_iteration();
 		let idle_step_weight = step_remove_keys_weight;
 
 		assert_eq!(PeoplePallet::on_idle(0, Weight::zero()), Weight::zero());
@@ -3290,13 +3063,22 @@ fn on_idle_works() {
 		PeoplePallet::on_poll(0, &mut meter);
 		assert_eq!(PendingSuspensions::<Test>::iter().count(), 2);
 		assert_eq!(meter.consumed(), poll_base_weight.saturating_add(step_remove_keys_weight));
-		let actual_idle_weight = PeoplePallet::on_idle(0, idle_step_weight.saturating_mul(2));
+		let expected_idle_weight = idle_base_weight
+			.saturating_add(idle_step_weight.saturating_mul(2))
+			.saturating_add(step_pending_suspensions_weight.saturating_mul(2));
+		let actual_idle_weight = PeoplePallet::on_idle(0, expected_idle_weight.saturating_mul(2));
 		assert_eq!(PendingSuspensions::<Test>::iter().count(), 0);
 		assert_eq!(
 			actual_idle_weight,
-			step_remove_keys_weight.saturating_add(
-				<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(8)
-			)
+			idle_base_weight
+				.saturating_add(step_remove_keys_weight)
+				.saturating_add(
+					<<Test as Config>::WeightInfo as crate::WeightInfo>::remove_suspended_people(8)
+				)
+				.saturating_add(
+					<<Test as Config>::WeightInfo as crate::WeightInfo>::onboard_people()
+				)
+				.saturating_add(step_pending_suspensions_weight.saturating_mul(2))
 		);
 	});
 }
@@ -3308,8 +3090,8 @@ fn test_under_alias_revision_check() {
 
 		// Setup a person and its alias account
 		let (_, pk, sk) = generate_people_with_index(0, 0).pop().unwrap();
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 0, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(0, None));
 		let ring_info = Root::<Test>::get(0).expect("Ring must exist after building");
 		assert_eq!(ring_info.revision, 0);
 		let alias_account: u64 = 42;
@@ -3345,8 +3127,8 @@ fn resetting_alias_account_for_new_revision_is_refunded() {
 		let (_, _key, _secret) = generate_people_with_index(0, 0).pop().unwrap();
 
 		// Build the ring with the single key we just inserted. This sets the ring revision to 0.
-		assert_ok!(PeoplePallet::onboard_people(RuntimeOrigin::none()));
-		assert_ok!(PeoplePallet::build_ring(RuntimeOrigin::none(), 0, None));
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(0, None));
 		let ring_info = Root::<Test>::get(0).expect("Ring must exist after build_ring");
 		assert_eq!(ring_info.revision, 0);
 

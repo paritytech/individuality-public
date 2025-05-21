@@ -58,12 +58,15 @@ pub trait WeightInfo {
 	fn merge_rings() -> Weight;
 	fn migrate_included_key() -> Weight;
 	fn migrate_onboarding_key() -> Weight;
-	fn validate_unsigned_with_build_ring(n: u32) -> Weight;
-	fn validate_unsigned_with_onboard_people() -> Weight;
+	fn should_build_ring(n: u32) -> Weight;
+	fn build_ring(n: u32) -> Weight;
+	fn onboard_people() -> Weight;
 	fn remove_suspended_people(n: u32) -> Weight;
+	fn pending_suspensions_iteration() -> Weight;
 	fn migrate_keys_single_included_key() -> Weight;
 	fn merge_queue_pages() -> Weight;
 	fn on_poll_base() -> Weight;
+	fn on_idle_base() -> Weight;
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -115,15 +118,23 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::zero()
 	}
 
-	fn validate_unsigned_with_build_ring(_n: u32) -> Weight {
+	fn should_build_ring(_n: u32) -> Weight {
 		Weight::zero()
 	}
 
-	fn validate_unsigned_with_onboard_people() -> Weight {
+	fn build_ring(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn onboard_people() -> Weight {
 		Weight::zero()
 	}
 
 	fn remove_suspended_people(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn pending_suspensions_iteration() -> Weight {
 		Weight::zero()
 	}
 
@@ -136,6 +147,10 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	}
 
 	fn on_poll_base() -> Weight {
+		Weight::zero()
+	}
+
+	fn on_idle_base() -> Weight {
 		Weight::zero()
 	}
 }
@@ -189,15 +204,23 @@ impl WeightInfo for () {
 		Weight::zero()
 	}
 
-	fn validate_unsigned_with_build_ring(_n: u32) -> Weight {
+	fn should_build_ring(_n: u32) -> Weight {
 		Weight::zero()
 	}
 
-	fn validate_unsigned_with_onboard_people() -> Weight {
+	fn build_ring(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn onboard_people() -> Weight {
 		Weight::zero()
 	}
 
 	fn remove_suspended_people(_n: u32) -> Weight {
+		Weight::zero()
+	}
+
+	fn pending_suspensions_iteration() -> Weight {
 		Weight::zero()
 	}
 
@@ -210,6 +233,10 @@ impl WeightInfo for () {
 	}
 
 	fn on_poll_base() -> Weight {
+		Weight::zero()
+	}
+
+	fn on_idle_base() -> Weight {
 		Weight::zero()
 	}
 }
