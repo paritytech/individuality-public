@@ -2026,7 +2026,7 @@ pub mod pallet {
 			Ok(Origin::PersonalAlias(RevisedContextualAlias {
 				revision: 0,
 				ring: 0,
-				ca: ContextualAlias { alias: [0; 32], context: *context },
+				ca: ContextualAlias { alias: [1; 32], context: *context },
 			})
 			.into())
 		}
