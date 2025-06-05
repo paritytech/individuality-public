@@ -3177,3 +3177,103 @@ fn resetting_alias_account_for_new_revision_is_refunded() {
 		assert_eq!(result.unwrap(), frame_support::pallet_prelude::Pays::No.into());
 	});
 }
+
+#[test]
+fn dispatch_tx_as_alias_while_updating_revision() {
+	new_test_ext().execute_with(|| {
+		OnboardingSize::<Test>::set(2);
+
+		let max_ring_size = <Test as Config>::MaxRingSize::get();
+		// Create a single person so that `build_ring` can work.
+		// let (_, _key, _secret) = generate_people_with_index(0, 0).pop().unwrap();
+		let people = generate_people_with_index(0, (2 * max_ring_size - 1) as u8);
+
+		// Build the rings with the keys we just inserted. This sets the ring revisions to 0.
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(PeoplePallet::onboard_people());
+		assert_ok!(build_ring(0, None));
+		assert_ok!(build_ring(1, None));
+		let ring_info = Root::<Test>::get(0).expect("Ring must exist after build_ring");
+		assert_eq!(ring_info.revision, 0);
+		let ring_info = Root::<Test>::get(1).expect("Ring must exist after build_ring");
+		assert_eq!(ring_info.revision, 0);
+
+		// Set the aliases for all people
+		// for alias_account in 100..(100 + max_ring_size * 2) {
+		for index in 0..(max_ring_size as u64 * 2) {
+			let alias_account = 100 + index;
+			setup_alias_account(
+				&people[index as usize].1,
+				&people[index as usize].2,
+				MOCK_CONTEXT,
+				alias_account,
+			);
+		}
+
+		// Suspend and remove more than half of the people in both rings
+		assert_ok!(PeoplePallet::start_people_set_mutation_session());
+		let suspensions: &[PersonalId] = &[1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16];
+		assert_ok!(PeoplePallet::suspend_personhood(suspensions));
+		assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![1, 2, 3, 4, 5, 6]);
+		assert_eq!(suspended_indices_list(1).into_inner(), vec![1, 2, 3, 4, 5, 6]);
+		assert_ok!(PeoplePallet::end_people_set_mutation_session());
+		let mut meter = WeightMeter::new();
+		PeoplePallet::migrate_keys(&mut meter);
+
+		PeoplePallet::remove_suspended_keys(RI_ZERO);
+		PeoplePallet::remove_suspended_keys(1);
+
+		// The current ring has a higher index than the ones being merged
+		CurrentRingIndex::<Test>::set(14);
+
+		assert_ok!(PeoplePallet::merge_rings(RuntimeOrigin::none(), 0, 1));
+		assert_ok!(build_ring(0, None));
+
+		// Insert some mock nonce for the second account.
+		frame_system::Account::<Test>::mutate(119, |info| info.nonce = 42);
+
+		let dummy_call = frame_system::Call::<Test>::remark { remark: vec![] };
+		// Update the alias and run a tx for a person from the original first ring
+		assert_ok!(exec_as_alias_with_updated_revision_tx(
+			100,
+			&people[0].1,
+			&people[0].2,
+			dummy_call.clone()
+		));
+		// Update the alias and run a tx for a person from the original second ring
+		assert_ok!(exec_as_alias_with_updated_revision_tx(
+			119,
+			&people[19].1,
+			&people[19].2,
+			dummy_call.clone()
+		));
+
+		// Ensure both alias revisions were updated.
+		assert_eq!(
+			AccountToAlias::<Test>::get(100),
+			Some(RevisedContextualAlias {
+				revision: 1,
+				ring: 0,
+				ca: ContextualAlias {
+					alias: <Test as Config>::Crypto::alias_in_context(&people[0].2, &MOCK_CONTEXT)
+						.unwrap(),
+					context: MOCK_CONTEXT
+				}
+			})
+		);
+		assert_eq!(
+			AccountToAlias::<Test>::get(119),
+			Some(RevisedContextualAlias {
+				revision: 1,
+				ring: 0,
+				ca: ContextualAlias {
+					alias: <Test as Config>::Crypto::alias_in_context(&people[19].2, &MOCK_CONTEXT)
+						.unwrap(),
+					context: MOCK_CONTEXT
+				}
+			})
+		);
+		assert_eq!(frame_system::Account::<Test>::get(100).nonce, 1);
+		assert_eq!(frame_system::Account::<Test>::get(119).nonce, 43);
+	});
+}

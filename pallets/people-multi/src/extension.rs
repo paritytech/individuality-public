@@ -66,6 +66,28 @@ pub enum AsPersonInfo<T: Config + Send + Sync> {
 	AsPersonalIdentityWithProof(<T::Crypto as GenerateVerifiable>::Signature, PersonalId),
 	/// The signed origin will be transformed using account to personal id.
 	AsPersonalIdentityWithAccount(T::Nonce),
+	/// The signed origin will be transformed using account to alias and the revision associated
+	/// with the alias will be updated to match the current ring of the person.
+	///
+	/// There must already be an alias <-> account pairing, although it does not have to
+	/// necessarily be out of date. If no alias <-> account pairing is present, the
+	/// `AsPersonalAliasWithProof` variant should be used along with a `set_alias_account` call.
+	///
+	/// The nonce must be the nonce of the account of the signer.
+	/// The proof must be created using the same key and context of the alias which is associated
+	/// with the account, but must take into account any changes related to the ring and its
+	/// revision. The proof message is created by hashing the encoded bytes of the
+	/// inherited_implication, the byte sequence "revise", the alias account and the account nonce.
+	/// The ring index must be the index of the ring to which the person is assigned at the time of
+	/// dispatch.
+	/// The context must be the same context that was used when establishing the alias <-> account
+	/// pairing.
+	AsPersonalAliasWithAccountRevised(
+		T::Nonce,
+		<T::Crypto as GenerateVerifiable>::Proof,
+		RingIndex,
+		Context,
+	),
 }
 
 /// Transaction extension to transform an origin into a personal alias or personal identity.
@@ -105,6 +127,7 @@ pub enum Val<T: Config + Send + Sync> {
 	NotUsing,
 	UsingProof,
 	UsingAccount(T::AccountId, T::Nonce),
+	UsingAccountWithRevisionUpdate(T::AccountId, T::Nonce, RevisedContextualAlias),
 }
 
 impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::RuntimeCall>
@@ -159,6 +182,47 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 				let validity = ValidTransaction { requires, provides, ..Default::default() };
 
 				Ok((validity, Val::UsingAccount(who, *nonce), origin))
+			},
+			Some(AsPersonInfo::AsPersonalAliasWithAccountRevised(
+				nonce,
+				proof,
+				ring_index,
+				context,
+			)) => {
+				let Some(frame_system::Origin::<T>::Signed(who)) = origin.as_system_ref() else {
+					return Err(InvalidTransaction::BadSigner.into());
+				};
+				let who = who.clone();
+
+				// Get the old entry in `AccountToAlias`, it will be removed in `prepare` if the
+				// checks are successful.
+				let old_rev_ca =
+					AccountToAlias::<T>::get(&who).ok_or(InvalidTransaction::BadSigner)?;
+				let ring = Root::<T>::get(ring_index).ok_or(InvalidTransaction::BadSigner)?;
+
+				let msg = (inherited_implication, "revise", &who, nonce)
+					.using_encoded(sp_io::hashing::blake2_256);
+
+				let alias = T::Crypto::validate(proof, &ring.root, &context[..], &msg[..])
+					.map_err(|_| InvalidTransaction::BadProof)?;
+				ensure!(alias == old_rev_ca.ca.alias, InvalidTransaction::BadSigner);
+				ensure!(*context == old_rev_ca.ca.context, InvalidTransaction::BadSigner);
+
+				let rev_ca = RevisedContextualAlias {
+					revision: ring.revision,
+					ring: *ring_index,
+					ca: ContextualAlias { alias, context: *context },
+				};
+
+				let local_origin = Origin::PersonalAlias(rev_ca.clone());
+				let mut origin = origin;
+				origin.set_caller_from(local_origin);
+
+				let ValidNonceInfo { requires, provides } =
+					validate_nonce_for_account::<T>(&who, *nonce)?;
+				let validity = ValidTransaction { requires, provides, ..Default::default() };
+
+				Ok((validity, Val::UsingAccountWithRevisionUpdate(who, *nonce, rev_ca), origin))
 			},
 			Some(AsPersonInfo::AsPersonalIdentityWithAccount(nonce)) => {
 				let Some(frame_system::Origin::<T>::Signed(who)) = origin.as_system_ref() else {
@@ -294,6 +358,13 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 	) -> Result<Self::Pre, TransactionValidityError> {
 		match val {
 			Val::UsingAccount(who, nonce) => prepare_nonce_for_account::<T>(&who, nonce)?,
+			Val::UsingAccountWithRevisionUpdate(who, nonce, rev_ca) => {
+				// `AliasToAccount` doesn't need any changes because the key is an unrevised
+				// contextual alias, which remains constant in this operation, as checked above.
+				// Replace the old entry in `AccountToAlias` with the new, updated revised alias.
+				AccountToAlias::<T>::insert(&who, &rev_ca);
+				prepare_nonce_for_account::<T>(&who, nonce)?
+			},
 			Val::NotUsing | Val::UsingProof => (),
 		}
 

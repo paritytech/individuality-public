@@ -355,6 +355,43 @@ pub fn exec_as_alias_tx(
 	exec_tx(Some(who), tx_ext, call)
 }
 
+/// Execute a transaction with the revised contextual alias origin with a revision update.
+pub fn exec_as_alias_with_updated_revision_tx(
+	who: u64,
+	key: &<Simple as GenerateVerifiable>::Member,
+	secret: &<Simple as GenerateVerifiable>::Secret,
+	call: impl Into<RuntimeCall>,
+) -> Result<(), TransactionExecutionError> {
+	let nonce = frame_system::Account::<Test>::get(who).nonce;
+	let id = crate::Keys::<Test>::get(key).expect("id not found");
+	let rev_ca = crate::AccountToAlias::<Test>::get(who).expect("alias account not found");
+	let record = crate::People::<Test>::get(id).expect("record not found");
+	let ring_index = record.position.ring_index().unwrap();
+	let commitment = {
+		let all_keys = crate::RingKeys::<Test>::get(ring_index);
+		Simple::open(key, all_keys.into_iter()).unwrap()
+	};
+	let call: RuntimeCall = call.into();
+	let other_tx_ext = (frame_system::CheckNonce::<Test>::from(0),);
+	// Here we simply ignore implicit as they are null.
+	let inherited_implication = (&EXTENSION_VERSION, &call, &other_tx_ext);
+	let msg =
+		(inherited_implication, "revise", &who, nonce).using_encoded(sp_io::hashing::blake2_256);
+	let (proof, _alias) = Simple::create(commitment, secret, &rev_ca.ca.context, &msg)
+		.expect("proof creation failed");
+	let tx_ext = (
+		AsPerson::new(Some(AsPersonInfo::AsPersonalAliasWithAccountRevised(
+			nonce,
+			proof,
+			ring_index,
+			rev_ca.ca.context,
+		))),
+		frame_system::CheckNonce::from(0),
+	);
+
+	exec_tx(Some(who), tx_ext, call)
+}
+
 /// Call `set_alias_account` for the given personal id and account.
 pub fn setup_alias_account(
 	key: &<Simple as GenerateVerifiable>::Member,
