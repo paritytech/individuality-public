@@ -2267,7 +2267,7 @@ mod onboard_people {
 					assert!(record.is_some());
 					match record.unwrap().position {
 						RingPosition::Included { ring_index: record_ring_index, .. } => {
-							assert_eq!(record_ring_index, ring_index, "{}", personal_id);
+							assert_eq!(record_ring_index, ring_index, "{personal_id}");
 						},
 						_ => panic!("Expected RingPosition::Included variant"),
 					}
@@ -2293,7 +2293,7 @@ mod onboard_people {
 					assert!(record.is_some());
 					match record.unwrap().position {
 						RingPosition::Included { ring_index: record_ring_index, .. } => {
-							assert_eq!(record_ring_index, ring_index, "{}", personal_id);
+							assert_eq!(record_ring_index, ring_index, "{personal_id}");
 						},
 						_ => panic!("Expected RingPosition::Included variant"),
 					}

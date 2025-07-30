@@ -53,9 +53,6 @@ pub mod pallet {
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
 
-		/// The runtime event type.
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
 		/// The origin which may command personhood updates through this pallet. Root can always do
 		/// this.
 		type UpdateOrigin: EnsureOrigin<Self::RuntimeOrigin>;

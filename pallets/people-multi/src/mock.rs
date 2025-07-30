@@ -23,8 +23,10 @@ use frame_support::{
 	assert_ok, derive_impl, dispatch::DispatchErrorWithPostInfo, match_types, parameter_types,
 	storage::with_transaction, weights::RuntimeDbWeight,
 };
-
-use frame_system::{offchain::CreateTransactionBase, ChainContext};
+use frame_system::{
+	offchain::{CreateBare, CreateTransactionBase},
+	ChainContext,
+};
 use sp_core::{ConstU16, ConstU32, ConstU64, H256};
 use sp_runtime::{
 	testing::UintAuthorityId,
@@ -90,8 +92,8 @@ impl frame_system::Config for Test {
 
 pub type Extrinsic = sp_runtime::testing::TestXt<RuntimeCall, ()>;
 
-impl CreateInherent<Call<Self>> for Test {
-	fn create_inherent(call: Self::RuntimeCall) -> Self::Extrinsic {
+impl CreateBare<Call<Self>> for Test {
+	fn create_bare(call: Self::RuntimeCall) -> Self::Extrinsic {
 		Extrinsic::new_bare(call)
 	}
 }
@@ -205,7 +207,6 @@ impl crate::WeightInfo for MockWeights {
 
 impl crate::Config for Test {
 	type WeightInfo = MockWeights;
-	type RuntimeEvent = RuntimeEvent;
 	type Crypto = verifiable::demo_impls::Simple;
 	type AccountContexts = TestAccountContexts;
 	type ChunkPageSize = ConstU32<5>;

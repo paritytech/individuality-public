@@ -177,9 +177,6 @@ pub mod pallet {
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
 
-		/// The runtime event type.
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
 		/// Trait allowing cryptographic proof of membership without exposing the underlying member.
 		/// Normally a Ring-VRF.
 		type Crypto: GenerateVerifiable<

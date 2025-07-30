@@ -172,7 +172,6 @@ pub const MAX_ALLOWANCE: u64 = 100;
 pub const ALLOWANCE_RECOVERY_PER_BLOCK: u64 = 5;
 
 impl crate::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type WeightInfo = ();
 	type RestrictedEntity = RuntimeRestrictedEntity;
 	type OperationAllowedOneTimeExcess = TestOperationAllowedOneTimeExcess;

@@ -159,9 +159,6 @@ pub mod pallet {
 		///
 		/// This must be only for call which have a reasonable maximum weight and length.
 		type OperationAllowedOneTimeExcess: ContainsPair<Self::RestrictedEntity, Self::RuntimeCall>;
-
-		/// The runtime event type.
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 	}
 
 	#[pallet::error]

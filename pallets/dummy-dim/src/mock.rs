@@ -17,7 +17,7 @@
 
 use frame_support::derive_impl;
 use frame_system::{
-	offchain::{CreateInherent, CreateTransactionBase},
+	offchain::{CreateBare, CreateTransactionBase},
 	pallet_prelude::ExtrinsicFor,
 	EnsureRoot,
 };
@@ -68,7 +68,6 @@ impl frame_system::Config for Test {
 
 impl pallet_people_multi::Config for Test {
 	type WeightInfo = ();
-	type RuntimeEvent = RuntimeEvent;
 	type Crypto = verifiable::demo_impls::Simple;
 	type AccountContexts = ();
 	type ChunkPageSize = ConstU32<8>;
@@ -83,7 +82,6 @@ impl pallet_people_multi::Config for Test {
 
 impl crate::Config for Test {
 	type WeightInfo = ();
-	type RuntimeEvent = RuntimeEvent;
 	type UpdateOrigin = EnsureRoot<Self::AccountId>;
 	type MaxPersonBatchSize = ConstU32<1000>;
 	type People = People;
@@ -96,8 +94,8 @@ pub fn advance_to(b: u64) {
 	}
 }
 
-impl CreateInherent<pallet_people_multi::Call<Self>> for Test {
-	fn create_inherent(call: Self::RuntimeCall) -> Self::Extrinsic {
+impl CreateBare<pallet_people_multi::Call<Self>> for Test {
+	fn create_bare(call: Self::RuntimeCall) -> Self::Extrinsic {
 		Self::Extrinsic::new_bare(call)
 	}
 }
