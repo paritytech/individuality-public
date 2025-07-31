@@ -24,10 +24,8 @@ use frame_support::{
 	ensure, pallet_prelude::TransactionSource, weights::Weight, CloneNoBound, DefaultNoBound,
 	EqNoBound, PartialEqNoBound,
 };
-use individuality_support::{
-	traits::Context,
-	utils::{prepare_nonce_for_account, validate_nonce_for_account, ValidNonceInfo},
-};
+use frame_system::{CheckNonce, ValidNonceInfo};
+use individuality_support::traits::Context;
 use scale_info::TypeInfo;
 use sp_core::twox_64;
 use sp_runtime::{
@@ -178,7 +176,7 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 				origin.set_caller_from(local_origin);
 
 				let ValidNonceInfo { requires, provides } =
-					validate_nonce_for_account::<T>(&who, *nonce)?;
+					CheckNonce::<T>::validate_nonce_for_account(&who, *nonce)?;
 				let validity = ValidTransaction { requires, provides, ..Default::default() };
 
 				Ok((validity, Val::UsingAccount(who, *nonce), origin))
@@ -219,7 +217,7 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 				origin.set_caller_from(local_origin);
 
 				let ValidNonceInfo { requires, provides } =
-					validate_nonce_for_account::<T>(&who, *nonce)?;
+					CheckNonce::<T>::validate_nonce_for_account(&who, *nonce)?;
 				let validity = ValidTransaction { requires, provides, ..Default::default() };
 
 				Ok((validity, Val::UsingAccountWithRevisionUpdate(who, *nonce, rev_ca), origin))
@@ -237,7 +235,7 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 				origin.set_caller_from(local_origin);
 
 				let ValidNonceInfo { requires, provides } =
-					validate_nonce_for_account::<T>(&who, *nonce)?;
+					CheckNonce::<T>::validate_nonce_for_account(&who, *nonce)?;
 				let validity = ValidTransaction { requires, provides, ..Default::default() };
 
 				Ok((validity, Val::UsingAccount(who, *nonce), origin))
@@ -357,13 +355,14 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 		_len: usize,
 	) -> Result<Self::Pre, TransactionValidityError> {
 		match val {
-			Val::UsingAccount(who, nonce) => prepare_nonce_for_account::<T>(&who, nonce)?,
+			Val::UsingAccount(who, nonce) =>
+				CheckNonce::<T>::prepare_nonce_for_account(&who, nonce)?,
 			Val::UsingAccountWithRevisionUpdate(who, nonce, rev_ca) => {
 				// `AliasToAccount` doesn't need any changes because the key is an unrevised
 				// contextual alias, which remains constant in this operation, as checked above.
 				// Replace the old entry in `AccountToAlias` with the new, updated revised alias.
 				AccountToAlias::<T>::insert(&who, &rev_ca);
-				prepare_nonce_for_account::<T>(&who, nonce)?
+				CheckNonce::<T>::prepare_nonce_for_account(&who, nonce)?
 			},
 			Val::NotUsing | Val::UsingProof => (),
 		}
