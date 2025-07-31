@@ -140,7 +140,7 @@ impl crate::WeightInfo for MockWeights {
 		Weight::from_parts(6, 6)
 	}
 
-	fn force_recognize_personhood() -> sp_runtime::Weight {
+	fn force_recognize_personhood(_n: u32) -> sp_runtime::Weight {
 		Weight::from_parts(7, 7)
 	}
 
