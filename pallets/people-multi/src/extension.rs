@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +15,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! People signed extensions.
+//! People transaction extensions.
 
 use crate::*;
 use codec::{Decode, DecodeWithMemTracking, Encode};
@@ -120,7 +120,7 @@ impl<T: Config + Send + Sync> AsPerson<T> {
 	}
 }
 
-/// Info returned by validate to prepare in the [`AsPerson`] transactinon extension.
+/// Info returned by validate to prepare in the [`AsPerson`] transaction extension.
 pub enum Val<T: Config + Send + Sync> {
 	NotUsing,
 	UsingProof,
@@ -139,11 +139,23 @@ impl<T: Config + Send + Sync> TransactionExtension<<T as frame_system::Config>::
 
 	fn weight(&self, _call: &<T as frame_system::Config>::RuntimeCall) -> Weight {
 		match self.0 {
+			// Extension is passthrough
 			None => Weight::zero(),
-			_ => {
-				// TODO: Gui weight for each variant.
-				Weight::zero()
-			},
+			// Alias with existing account
+			Some(AsPersonInfo::AsPersonalAliasWithAccount(_)) =>
+				T::WeightInfo::as_person_alias_with_account(),
+			// Alias with proof
+			Some(AsPersonInfo::AsPersonalAliasWithProof(_, _, _)) =>
+				T::WeightInfo::as_person_alias_with_proof(),
+			// Personal Identity with proof
+			Some(AsPersonInfo::AsPersonalIdentityWithProof(_, _)) =>
+				T::WeightInfo::as_person_identity_with_proof(),
+			// Personal Identity with existing account
+			Some(AsPersonInfo::AsPersonalIdentityWithAccount(_)) =>
+				T::WeightInfo::as_person_identity_with_account(),
+			// Alias with account revised at the same time
+			Some(AsPersonInfo::AsPersonalAliasWithAccountRevised(..)) =>
+				T::WeightInfo::as_person_alias_with_account_revised(),
 		}
 	}
 

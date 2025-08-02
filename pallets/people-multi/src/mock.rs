@@ -23,10 +23,7 @@ use frame_support::{
 	assert_ok, derive_impl, dispatch::DispatchErrorWithPostInfo, match_types, parameter_types,
 	storage::with_transaction, weights::RuntimeDbWeight,
 };
-use frame_system::{
-	offchain::{CreateBare, CreateTransactionBase},
-	ChainContext,
-};
+use frame_system::{offchain::CreateTransactionBase, ChainContext};
 use sp_core::{ConstU16, ConstU32, ConstU64, H256};
 use sp_runtime::{
 	testing::UintAuthorityId,
@@ -35,6 +32,9 @@ use sp_runtime::{
 	BuildStorage, DispatchError, Weight,
 };
 use verifiable::demo_impls::Simple;
+
+// First ring, used in testing.
+pub const RI_ZERO: RingIndex = 0;
 
 const EXTENSION_VERSION: u8 = 0;
 pub type TransactionExtension = (AsPerson<Test>, frame_system::CheckNonce<Test>);
@@ -92,12 +92,6 @@ impl frame_system::Config for Test {
 
 pub type Extrinsic = sp_runtime::testing::TestXt<RuntimeCall, ()>;
 
-impl CreateBare<Call<Self>> for Test {
-	fn create_bare(call: Self::RuntimeCall) -> Self::Extrinsic {
-		Extrinsic::new_bare(call)
-	}
-}
-
 impl CreateTransactionBase<Call<Self>> for Test {
 	type Extrinsic = Extrinsic;
 	type RuntimeCall = RuntimeCall;
@@ -116,14 +110,6 @@ match_types! {
 
 pub struct MockWeights;
 impl crate::WeightInfo for MockWeights {
-	fn as_personal_identity() -> sp_runtime::Weight {
-		Weight::from_parts(1, 1)
-	}
-
-	fn as_personal_alias() -> sp_runtime::Weight {
-		Weight::from_parts(2, 2)
-	}
-
 	fn under_alias() -> sp_runtime::Weight {
 		Weight::from_parts(3, 3)
 	}
@@ -134,10 +120,6 @@ impl crate::WeightInfo for MockWeights {
 
 	fn unset_alias_account() -> sp_runtime::Weight {
 		Weight::from_parts(5, 5)
-	}
-
-	fn reset_root() -> sp_runtime::Weight {
-		Weight::from_parts(6, 6)
 	}
 
 	fn force_recognize_personhood(_n: u32) -> sp_runtime::Weight {
@@ -180,7 +162,7 @@ impl crate::WeightInfo for MockWeights {
 		Weight::from_parts(15, 15)
 	}
 
-	fn remove_suspended_people(n: u32) -> sp_runtime::Weight {
+	fn remove_suspended_keys(n: u32) -> sp_runtime::Weight {
 		Weight::from_parts(n as u64 * 16, n as u64 * 16)
 	}
 
@@ -203,6 +185,26 @@ impl crate::WeightInfo for MockWeights {
 	fn on_idle_base() -> sp_runtime::Weight {
 		Weight::from_parts(20, 20)
 	}
+
+	fn as_person_alias_with_account() -> Weight {
+		Weight::from_parts(20, 20)
+	}
+
+	fn as_person_identity_with_account() -> Weight {
+		Weight::from_parts(21, 21)
+	}
+
+	fn as_person_alias_with_proof() -> Weight {
+		Weight::from_parts(22, 22)
+	}
+
+	fn as_person_identity_with_proof() -> Weight {
+		Weight::from_parts(23, 23)
+	}
+
+	fn as_person_alias_with_account_revised() -> Weight {
+		Weight::from_parts(24, 24)
+	}
 }
 
 impl crate::Config for Test {
@@ -212,9 +214,6 @@ impl crate::Config for Test {
 	type ChunkPageSize = ConstU32<5>;
 	type MaxRingSize = MaxRingSize;
 	type OnboardingQueuePageSize = ConstU32<40>;
-	type RingBakingInterval = ConstU64<10>;
-	type QueuePageMergingInterval = ConstU64<10>;
-	type MaxTaskLifespan = ConstU64<5>;
 
 	#[cfg(feature = "runtime-benchmarks")]
 	type BenchmarkHelper = BenchHelper;

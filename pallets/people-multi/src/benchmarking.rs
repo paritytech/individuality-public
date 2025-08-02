@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020-2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,18 +16,24 @@
 // limitations under the License.
 
 use super::*;
-
+use crate::extension::{AsPerson, AsPersonInfo};
 use alloc::vec;
+use core::marker::{Send, Sync};
 use frame_benchmarking::{account, v2::*, BenchmarkError};
 use frame_support::{
 	assert_ok,
-	pallet_prelude::Get,
-	traits::{OnIdle, OnPoll},
+	dispatch::RawOrigin,
+	pallet_prelude::{Get, Pays},
+	traits::{Len, OnIdle, OnPoll},
 };
 use frame_system::RawOrigin as SystemOrigin;
-use individuality_support::traits::RI_ZERO;
-use sp_runtime::{traits::AppendZerosInput, Weight};
+use sp_runtime::{
+	generic::ExtensionVersion,
+	traits::{AppendZerosInput, AsTransactionAuthorizedOrigin, DispatchTransaction},
+	Weight,
+};
 
+const RI_ZERO: RingIndex = 0;
 const SEED: u32 = 0;
 
 type SecretOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Secret;
@@ -116,80 +122,13 @@ fn prepare_chunks<T: Config>() {
 }
 
 #[benchmarks(
-	where T: Config + core::marker::Send + core::marker::Sync,
+	where T: Send + Sync,
+		<T as frame_system::Config>::RuntimeCall:
+			Dispatchable<Info = DispatchInfo, PostInfo = PostDispatchInfo> + IsSubType<Call<T>> + From<Call<T>> + GetDispatchInfo,
+		<T as frame_system::Config>::RuntimeOrigin: AsTransactionAuthorizedOrigin,
 )]
 mod benches {
 	use super::*;
-	use frame_support::{dispatch::RawOrigin, traits::Len};
-
-	#[benchmark]
-	fn as_personal_identity() -> Result<(), BenchmarkError> {
-		prepare_chunks::<T>();
-
-		// Generate people and build a ring
-		let caller: T::AccountId = whitelisted_caller();
-		let members = generate_members_for_ring::<T>(SEED);
-		let recognized_people = recognize_people::<T>(&members);
-		assert_ok!(pallet::Pallet::<T>::onboard_people());
-		let to_include =
-			pallet::Pallet::<T>::should_build_ring(RI_ZERO, T::MaxRingSize::get()).unwrap();
-		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, to_include));
-
-		// Select one of the generated people's information
-		let (personal_id, _, secret): &(PersonalId, MemberOf<T>, SecretOf<T>) =
-			&recognized_people[0];
-
-		// A simple call to benchmark with
-		let call = frame_system::Call::<T>::remark { remark: vec![] };
-		let boxed_call: Box<<T as frame_system::Config>::RuntimeCall> = Box::new(call.into());
-		let signature = boxed_call.using_encoded(|msg| {
-			<T::Crypto as GenerateVerifiable>::sign(secret, msg)
-				.expect("failed to create signature")
-		});
-
-		#[extrinsic_call]
-		_(RawOrigin::Signed(caller), *personal_id, boxed_call, signature);
-
-		Ok(())
-	}
-
-	#[benchmark]
-	fn as_personal_alias() -> Result<(), BenchmarkError> {
-		prepare_chunks::<T>();
-
-		// Generate people and build a ring
-		let caller: T::AccountId = whitelisted_caller();
-		let members = generate_members_for_ring::<T>(SEED);
-		recognize_people::<T>(&members);
-		assert_ok!(pallet::Pallet::<T>::onboard_people());
-		let to_include =
-			pallet::Pallet::<T>::should_build_ring(RI_ZERO, T::MaxRingSize::get()).unwrap();
-		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, to_include));
-
-		// A simple call to benchmark with
-		let call = frame_system::Call::<T>::remark { remark: vec![] };
-		let boxed_call: Box<<T as frame_system::Config>::RuntimeCall> = Box::new(call.into());
-
-		let context = T::BenchmarkHelper::valid_account_context();
-
-		// Generate a valid proof
-		let proof = boxed_call.using_encoded(|msg| {
-			let (secret, member) = &members[0];
-			T::Crypto::create(
-				T::Crypto::open(member, members.iter().map(|(_, m)| m.clone())).unwrap(),
-				secret,
-				&context[..],
-				msg,
-			)
-			.map(|(p, _)| p)
-			.expect("should create proof")
-		});
-
-		#[extrinsic_call]
-		_(RawOrigin::Signed(caller), context, boxed_call, proof, RI_ZERO);
-
-		Ok(())
-	}
 
 	#[benchmark]
 	fn under_alias() -> Result<(), BenchmarkError> {
@@ -415,9 +354,9 @@ mod benches {
 	#[benchmark]
 	fn set_onboarding_size() -> Result<(), BenchmarkError> {
 		#[extrinsic_call]
-		_(SystemOrigin::Root, u32::MAX);
+		_(SystemOrigin::Root, 1);
 
-		assert_eq!(OnboardingSize::<T>::get(), u32::MAX);
+		assert_eq!(OnboardingSize::<T>::get(), 1);
 
 		Ok(())
 	}
@@ -469,8 +408,10 @@ mod benches {
 		// The current ring has to have a higher index than the ones being merged
 		CurrentRingIndex::<T>::set(14);
 
+		let account: T::AccountId = account("caller", 0, SEED);
+
 		#[extrinsic_call]
-		_(SystemOrigin::None, RI_ZERO, 1);
+		_(SystemOrigin::Signed(account), RI_ZERO, 1);
 
 		assert_eq!(RingKeys::<T>::get(RI_ZERO).len(), keys_left_len);
 		assert_eq!(RingKeysStatus::<T>::get(RI_ZERO).total, keys_left_len as u32);
@@ -860,6 +801,292 @@ mod benches {
 		{
 			pallet::Pallet::<T>::on_idle(0u32.into(), Weight::MAX);
 		}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn as_person_alias_with_account() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
+		// Generate people and build a ring
+		let members = generate_members_for_ring::<T>(SEED);
+		recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people());
+		let to_include =
+			pallet::Pallet::<T>::should_build_ring(RI_ZERO, T::MaxRingSize::get()).unwrap();
+		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, to_include));
+
+		// Create account and alias
+		let account: T::AccountId = account("caller", 0, SEED);
+		let context = T::BenchmarkHelper::valid_account_context();
+		let alias_value: Alias = [0u8; 32];
+		let ra = RevisedContextualAlias {
+			revision: 0,
+			ring: RI_ZERO,
+			ca: ContextualAlias { context, alias: alias_value },
+		};
+
+		// Set up alias account association
+		let block_number = frame_system::Pallet::<T>::block_number();
+		assert_ok!(pallet::Pallet::<T>::set_alias_account(
+			Origin::PersonalAlias(ra.clone()).into(),
+			account.clone(),
+			block_number
+		));
+		assert!(AccountToAlias::<T>::contains_key(&account));
+		assert!(AliasToAccount::<T>::contains_key(&ra.ca));
+
+		// A simple call to benchmark with
+		let inner = frame_system::Call::<T>::remark { remark: vec![] };
+		let call: <T as frame_system::Config>::RuntimeCall = inner.into();
+
+		let ext =
+			AsPerson::new(Some(AsPersonInfo::<T>::AsPersonalAliasWithAccount(T::Nonce::default())));
+		let info = call.get_dispatch_info();
+		let post_info = PostDispatchInfo {
+			actual_weight: Some(Weight::from_parts(10, 0)),
+			pays_fee: Pays::Yes,
+		};
+		let len = call.encoded_size();
+
+		#[block]
+		{
+			ext.test_run(RawOrigin::Signed(account).into(), &call, &info, len, 0, |_| {
+				Ok(post_info)
+			})
+			.unwrap()
+			.unwrap();
+		}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn as_person_identity_with_account() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
+		// Generate people and build a ring
+		let members = generate_members_for_ring::<T>(SEED);
+		let recognized_people = recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people());
+		let to_include =
+			pallet::Pallet::<T>::should_build_ring(RI_ZERO, T::MaxRingSize::get()).unwrap();
+		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, to_include));
+
+		// Select one of the generated people's information
+		let (personal_id, _, _): &(PersonalId, MemberOf<T>, SecretOf<T>) = &recognized_people[0];
+
+		// Set up personal ID account association
+		let account: T::AccountId = account("caller", 0, SEED);
+		let block_number = frame_system::Pallet::<T>::block_number();
+		assert_ok!(pallet::Pallet::<T>::set_personal_id_account(
+			Origin::PersonalIdentity(*personal_id).into(),
+			account.clone(),
+			block_number
+		));
+		assert!(AccountToPersonalId::<T>::contains_key(&account));
+
+		// A simple call to benchmark with
+		let inner = frame_system::Call::<T>::remark { remark: vec![] };
+		let call: <T as frame_system::Config>::RuntimeCall = inner.into();
+
+		let ext = AsPerson::new(Some(AsPersonInfo::<T>::AsPersonalIdentityWithAccount(
+			T::Nonce::default(),
+		)));
+		let info = call.get_dispatch_info();
+		let post_info = PostDispatchInfo {
+			actual_weight: Some(Weight::from_parts(10, 0)),
+			pays_fee: Pays::Yes,
+		};
+		let len = call.encoded_size();
+
+		#[block]
+		{
+			ext.test_run(RawOrigin::Signed(account).into(), &call, &info, len, 0, |_| {
+				Ok(post_info)
+			})
+			.unwrap()
+			.unwrap();
+		}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn as_person_alias_with_proof() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
+		// Generate people and build a ring
+		let account: T::AccountId = account("caller", 0, SEED);
+		let members = generate_members_for_ring::<T>(SEED);
+		recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people());
+		let to_include =
+			pallet::Pallet::<T>::should_build_ring(RI_ZERO, T::MaxRingSize::get()).unwrap();
+		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, to_include));
+
+		// The call to set the alias, the only one valid for this extension code path.
+		let block_number = frame_system::Pallet::<T>::block_number();
+		let inner = Call::<T>::set_alias_account { account, call_valid_at: block_number };
+		let call: <T as frame_system::Config>::RuntimeCall = inner.into();
+
+		let context = T::BenchmarkHelper::valid_account_context();
+		let ext_version: ExtensionVersion = 0;
+
+		// Generate a valid proof
+		let proof = (ext_version, &call).using_encoded(|msg| {
+			let (secret, member) = &members[0];
+			T::Crypto::create(
+				T::Crypto::open(member, members.iter().map(|(_, m)| m.clone())).unwrap(),
+				secret,
+				&context[..],
+				&sp_io::hashing::blake2_256(msg),
+			)
+			.map(|(p, _)| p)
+			.expect("should create proof")
+		});
+
+		let ext = AsPerson::new(Some(AsPersonInfo::<T>::AsPersonalAliasWithProof(
+			proof, RI_ZERO, context,
+		)));
+		let info = call.get_dispatch_info();
+		let post_info = PostDispatchInfo {
+			actual_weight: Some(Weight::from_parts(10, 0)),
+			pays_fee: Pays::Yes,
+		};
+		let len = call.encoded_size();
+
+		#[block]
+		{
+			ext.test_run(RawOrigin::None.into(), &call, &info, len, 0, |_| Ok(post_info))
+				.unwrap()
+				.unwrap();
+		}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn as_person_identity_with_proof() -> Result<(), BenchmarkError> {
+		prepare_chunks::<T>();
+
+		// Generate people and build a ring
+		let account: T::AccountId = account("caller", 0, SEED);
+		let members = generate_members_for_ring::<T>(SEED);
+		let recognized_people = recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people());
+		let to_include =
+			pallet::Pallet::<T>::should_build_ring(RI_ZERO, T::MaxRingSize::get()).unwrap();
+		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, to_include));
+
+		// Select one of the generated people's information
+		let (personal_id, _, secret): &(PersonalId, MemberOf<T>, SecretOf<T>) =
+			&recognized_people[0];
+
+		// The call to set the personal ID account, the only one valid for this extension code path.
+		let block_number = frame_system::Pallet::<T>::block_number();
+		let inner = Call::<T>::set_personal_id_account { account, call_valid_at: block_number };
+		let call: <T as frame_system::Config>::RuntimeCall = inner.into();
+		let ext_version: ExtensionVersion = 0;
+		let signature = (ext_version, &call).using_encoded(|msg| {
+			<T::Crypto as GenerateVerifiable>::sign(secret, &sp_io::hashing::blake2_256(msg))
+				.expect("failed to create signature")
+		});
+
+		let ext = AsPerson::new(Some(AsPersonInfo::<T>::AsPersonalIdentityWithProof(
+			signature,
+			*personal_id,
+		)));
+		let info = call.get_dispatch_info();
+		let post_info = PostDispatchInfo {
+			actual_weight: Some(Weight::from_parts(10, 0)),
+			pays_fee: Pays::Yes,
+		};
+		let len = call.encoded_size();
+
+		#[block]
+		{
+			ext.test_run(RawOrigin::None.into(), &call, &info, len, 0, |_| Ok(post_info))
+				.unwrap()
+				.unwrap();
+		}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn as_person_alias_with_account_revised() -> Result<(), BenchmarkError> {
+		// Prepare the benchmarking environment
+		prepare_chunks::<T>();
+		let members = generate_members_for_ring::<T>(SEED);
+		recognize_people::<T>(&members);
+		assert_ok!(pallet::Pallet::<T>::onboard_people());
+		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, 1)); // revision 0
+		assert_eq!(Root::<T>::get(RI_ZERO).unwrap().revision, 0);
+
+		// Register an alias‑account mapping at revision 0
+		let account: T::AccountId = account("caller", 0, SEED);
+		let context = T::BenchmarkHelper::valid_account_context();
+		let (secret, member) = &members[0];
+		let block_number = frame_system::Pallet::<T>::block_number();
+		let alias =
+			T::Crypto::alias_in_context(secret, &context[..]).expect("alias creation must succeed");
+		let rev_ca_0 = RevisedContextualAlias {
+			revision: 0,
+			ring: RI_ZERO,
+			ca: ContextualAlias { context, alias },
+		};
+
+		assert_ok!(pallet::Pallet::<T>::set_alias_account(
+			Origin::PersonalAlias(rev_ca_0).into(),
+			account.clone(),
+			block_number
+		));
+		assert!(AccountToAlias::<T>::contains_key(&account));
+
+		// Force the ring to revision 1 (include remaining keys)
+		assert_ok!(pallet::Pallet::<T>::build_ring(RI_ZERO, 1)); // revision 1
+		assert_eq!(Root::<T>::get(RI_ZERO).unwrap().revision, 1);
+
+		// Build the proof needed by the revised extension
+		let call_inner = frame_system::Call::<T>::remark { remark: vec![] };
+		let call: <T as frame_system::Config>::RuntimeCall = call_inner.into();
+		let commitment = T::Crypto::open(member, RingKeys::<T>::get(RI_ZERO).into_iter().take(2))
+			.expect("member must still be in ring");
+		let nonce: T::Nonce = T::Nonce::default();
+		let ext_version: ExtensionVersion = 0;
+		let inherited_impl = (ext_version, &call);
+		let msg_rev =
+			(inherited_impl, "revise", &account, nonce).using_encoded(sp_io::hashing::blake2_256);
+		let (proof_rev, _) = T::Crypto::create(commitment, secret, &context[..], &msg_rev)
+			.expect("revision proof creation failed");
+
+		let ext = AsPerson::new(Some(AsPersonInfo::<T>::AsPersonalAliasWithAccountRevised(
+			nonce, proof_rev, RI_ZERO, context,
+		)));
+		let info = call.get_dispatch_info();
+		let post_info = PostDispatchInfo {
+			actual_weight: Some(Weight::from_parts(10, 0)),
+			pays_fee: Pays::Yes,
+		};
+		let len = call.encoded_size();
+
+		// Execute only the extension logic
+		#[block]
+		{
+			ext.test_run(RawOrigin::Signed(account.clone()).into(), &call, &info, len, 0, |_| {
+				Ok(post_info)
+			})
+			.unwrap()
+			.unwrap();
+		}
+
+		// Verify that the alias mapping has been upgraded in-place
+		let updated = AccountToAlias::<T>::get(&account).expect("mapping exists");
+		assert_eq!(updated.revision, 1);
+		assert_eq!(updated.ca.alias, alias);
+		assert_eq!(updated.ca.context, context);
 
 		Ok(())
 	}

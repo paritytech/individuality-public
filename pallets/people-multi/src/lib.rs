@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,9 +30,9 @@
 //! structure.
 //!
 //! The pallet accepts new persons after they prove their uniqueness elsewhere, stores their
-//! information, and will support removing persons in the future. While other systems (e.g.,
-//! wallets) generate the proofs, this pallet handles the storage of all necessary data and verifies
-//! the proofs when used.
+//! information, and supports removing persons via suspensions. While other systems (e.g., wallets)
+//! generate the proofs, this pallet handles the storage of all necessary data and verifies the
+//! proofs when used.
 //!
 //! ## Key Features
 //!
@@ -49,27 +49,48 @@
 //! - `set_alias_account(origin, account)`: Link an account to a contextual alias Once linked, this
 //!   allows the account to dispatch transactions as a person with the alias origin using a regular
 //!   signed transaction with a nonce, providing a simpler alternative to attaching full proofs.
-//! - `unset_alias_account(origin)`: Remove an account-alias link
+//! - `unset_alias_account(origin)`: Remove an account-alias link.
+//! - `merge_rings`: Merge the people in two rings into a single, new ring.
+//! - `force_recognize_personhood`: Recognize a set of people without any additional checks.
+//! - `set_personal_id_account`: Set a personal id account.
+//! - `unset_personal_id_account`: Unset the personal id account.
+//! - `migrate_included_key`: Migrate the key for a person who was onboarded and is currently
+//!   included in a ring.
+//! - `migrate_onboarding_key`: Migrate the key for a person who is currently onboarding. The
+//!   operation is instant, replacing the old key in the onboarding queue.
+//! - `set_onboarding_size`: Force set the onboarding size for new people. This call requires root
+//!   privileges.
+//! - `build_ring_manual`: Manually build a ring root by including registered people. The
+//!   transaction fee is refunded on a successful call.
+//! - `onboard_people_manual`: Manually onboard people into a ring. The transaction fee is refunded
+//!   on a successful call.
 //!
-//! ### Tasks
+//! ### Automated tasks performed by the pallet in hooks
 //!
-//! - `build_ring(origin, ring_index)`: Build or update a ring's cryptographic commitment. This task
-//!   processes queued keys into a ring commitment that enables proof generation and verification.
-//!   Since ring construction, or rather adding keys to the ring, is computationally expensive, it's
-//!   performed periodically in batches rather than processing each key immediately. The batch size
-//!   needs to be reasonably large to enhance privacy by obscuring the exact timing of when
-//!   individuals' keys were added to the ring, making it more difficult to correlate specific
-//!   persons with their keys.
-//!
-//! ### Storage Items
-//!
-//! - `Root`: Maps ring indices to their cryptographic commitments
-//! - `RingKeys`: Maps ring indices to the keys in each ring, tracking both already included keys
-//!   and those waiting to be included. For each ring, it maintains the total set of keys and a
-//!   counter indicating how many of those keys have been processed into the ring commitment.
-//! - `People`: Maps PersonalIds to their record information
-//! - `AliasToAccount`: Maps contextual aliases to accounts
-//! - `AccountToAlias`: Maps accounts to their contextual aliases
+//! - Ring building: Build or update a ring's cryptographic commitment. This task processes queued
+//!   keys into a ring commitment that enables proof generation and verification. Since ring
+//!   construction, or rather adding keys to the ring, is computationally expensive, it's performed
+//!   periodically in batches rather than processing each key immediately. The batch size needs to
+//!   be reasonably large to enhance privacy by obscuring the exact timing of when individuals' keys
+//!   were added to the ring, making it more difficult to correlate specific persons with their
+//!   keys.
+//! - People onboarding: Onboard people from the onboarding queue into a ring. This task takes the
+//!   unincluded keys of recognized people from the onboarding queue and registers them into the
+//!   ring. People can be onboarded only in batches of at least `OnboardingSize` and when the
+//!   remaining open slots in a ring are at least `OnboardingSize`. This does not compute the root,
+//!   that is done using `build_ring`.
+//! - Cleaning of suspended people: Remove people's keys marked as suspended or inactive from rings.
+//!   The keys are stored in the `PendingSuspensions` map and they are removed from rings and their
+//!   roots are reset. The ring roots will subsequently be build in the ring building phase from
+//!   scratch. sequentially.
+//! - Key migration: Migrate the keys for people who were onboarded and are currently included in
+//!   rings. The migration is not instant as the key replacement and subsequent inclusion in a new
+//!   ring root will happen only after the next mutation session.
+//! - Onboarding queue page merging: Merge the two pages at the front of the onboarding queue. After
+//!   a round of suspensions, it is possible for the second page of the onboarding queue to be left
+//!   with few members such that, if the first page also has few members, the total count is below
+//!   the required onboarding size, thus stalling the queue. This function fixes this by moving the
+//!   people from the first page to the front of the second page, defragmenting the queue.
 //!
 //! ### Transaction Extension
 //!
@@ -125,9 +146,9 @@ use frame_support::{
 	transactional,
 	weights::WeightMeter,
 };
-use frame_system::offchain::CreateInherent;
 use individuality_support::traits::{
-	AddOnlyPeopleTrait, Context, ContextualAlias, PeopleTrait, PersonalId, RingIndex,
+	AddOnlyPeopleTrait, Context, ContextualAlias, CountedMembers, PeopleTrait, PersonalId,
+	RingIndex,
 };
 use scale_info::TypeInfo;
 use sp_runtime::{
@@ -144,7 +165,6 @@ pub mod pallet {
 	use super::*;
 	use frame_support::{pallet_prelude::*, traits::Contains};
 	use frame_system::pallet_prelude::{BlockNumberFor, *};
-	use individuality_support::traits::CountedMembers;
 
 	const LOG_TARGET: &str = "runtime::people";
 
@@ -153,26 +173,25 @@ pub mod pallet {
 
 	#[pallet::config]
 	pub trait Config:
-		CreateInherent<Call<Self>>
-		+ frame_system::Config<
-			RuntimeOrigin: From<Origin>
-			                   + From<<Self::RuntimeOrigin as OriginTrait>::PalletsOrigin>
-			                   + OriginTrait<
-				PalletsOrigin: From<Origin>
-				                   + TryInto<
-					Origin,
-					Error = <Self::RuntimeOrigin as OriginTrait>::PalletsOrigin,
-				>,
+		frame_system::Config<
+		RuntimeOrigin: From<Origin>
+		                   + From<<Self::RuntimeOrigin as OriginTrait>::PalletsOrigin>
+		                   + OriginTrait<
+			PalletsOrigin: From<Origin>
+			                   + TryInto<
+				Origin,
+				Error = <Self::RuntimeOrigin as OriginTrait>::PalletsOrigin,
 			>,
-			RuntimeCall: Parameter
-			                 + GetDispatchInfo
-			                 + IsSubType<Call<Self>>
-			                 + Dispatchable<
-				RuntimeOrigin = Self::RuntimeOrigin,
-				Info = DispatchInfo,
-				PostInfo = PostDispatchInfo,
-			>,
-		>
+		>,
+		RuntimeCall: Parameter
+		                 + GetDispatchInfo
+		                 + IsSubType<Call<Self>>
+		                 + Dispatchable<
+			RuntimeOrigin = Self::RuntimeOrigin,
+			Info = DispatchInfo,
+			PostInfo = PostDispatchInfo,
+		>,
+	>
 	{
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
@@ -201,20 +220,6 @@ pub mod pallet {
 		#[pallet::constant]
 		type OnboardingQueuePageSize: Get<u32>;
 
-		/// Interval at which calls to build_ring will be accepted
-		/// e.g., if interval = 10, calls to bake rings will only succeed at blocks 0, 10, 20 etc.
-		#[pallet::constant]
-		type RingBakingInterval: Get<BlockNumberFor<Self>>;
-
-		/// Interval at which the offchain worker will look to merge onboarding queue pages, in
-		/// blocks.
-		#[pallet::constant]
-		type QueuePageMergingInterval: Get<BlockNumberFor<Self>>;
-
-		/// Maximum time in blocks that a task transaction to drive ring changes may stay alive.
-		#[pallet::constant]
-		type MaxTaskLifespan: Get<BlockNumberFor<Self>>;
-
 		/// Helper for benchmarks.
 		#[cfg(feature = "runtime-benchmarks")]
 		type BenchmarkHelper: BenchmarkHelper<<Self::Crypto as GenerateVerifiable>::StaticChunk>;
@@ -229,8 +234,6 @@ pub mod pallet {
 	pub type CurrentRingIndex<T: Config> = StorageValue<_, u32, ValueQuery>;
 
 	/// Maximum number of people queued before onboarding to a ring.
-	///
-	/// TODO: To be moved to config for the production version.
 	#[pallet::storage]
 	pub type OnboardingSize<T: Config> = StorageValue<_, u32, ValueQuery>;
 
@@ -352,13 +355,6 @@ pub mod pallet {
 		ValueQuery,
 	>;
 
-	/// A wrapping counter for the number of times the `migrate_keys` task was called.
-	///
-	/// This is used to build the tags of the unsigned transaction and ensure that only the correct
-	/// amount of extrinsics ever make it into the transaction pool.
-	#[pallet::storage]
-	pub type MigrationTaskCounter<T> = StorageValue<_, u32, ValueQuery>;
-
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
@@ -422,8 +418,6 @@ pub mod pallet {
 		InvalidRing,
 		/// Ring cannot be built while there are suspensions pending.
 		SuspensionsPending,
-		/// There are no suspensions to be removed.
-		NoSuspensions,
 		/// Ring cannot be merged if it's not below 1/2 capacity.
 		RingAboveMergeThreshold,
 		/// Suspension indices provided are invalid.
@@ -432,8 +426,6 @@ pub mod pallet {
 		NoMutationSession,
 		/// An mutating session could not be started.
 		CouldNotStartMutationSession,
-		/// A key migration action was queued when there was no key migration session in progress.
-		NoKeyMigrationSession,
 		/// Cannot merge rings while a suspension session is in progress.
 		SuspensionSessionInProgress,
 		/// Call is too late or too early.
@@ -444,15 +436,13 @@ pub mod pallet {
 		NotSuspended,
 		/// Personhood is suspended.
 		Suspended,
-		/// The onboarding queue pages are already defragmented and cannot be merged.
-		QueueStable,
-		/// Insufficient static chunks in storage to push members.
-		InsufficientChunks,
 		/// Invalid state for attempted key migration.
 		InvalidKeyMigration,
 		/// Invalid suspension of a key belonging to a person whose index in the ring has already
 		/// been included in the pending suspensions list.
 		KeyAlreadySuspended,
+		/// The onboarding size must not exceed the maximum ring size.
+		InvalidOnboardingSize,
 	}
 
 	#[pallet::origin]
@@ -480,13 +470,6 @@ pub mod pallet {
 				"chunk page size must hold at least one element"
 			);
 			assert!(<T as Config>::MaxRingSize::get() > 0, "rings must hold at least one person");
-			// Uncomment when `OnboardingSize` becomes a config value again.
-			// assert!(OnboardingSize::<T>::get() > 0, "onboarding size must be more than one
-			// person");
-			assert!(
-				OnboardingSize::<T>::get() <= <T as Config>::MaxRingSize::get(),
-				"onboarding size must be less than or equal to max ring size"
-			);
 			assert!(
 				<T as Config>::MaxRingSize::get() <= <T as Config>::OnboardingQueuePageSize::get(),
 				"onboarding queue page size must greater than or equal to max ring size"
@@ -505,9 +488,9 @@ pub mod pallet {
 			// Check if there are any rings with suspensions and try to clean the first one.
 			if let Some(ring_index) = PendingSuspensions::<T>::iter_keys().next() {
 				if Self::should_remove_suspended_keys(ring_index, true) &&
-					weight_meter.can_consume(T::WeightInfo::remove_suspended_people(
-						T::MaxRingSize::get(),
-					)) {
+					weight_meter
+						.can_consume(T::WeightInfo::remove_suspended_keys(T::MaxRingSize::get()))
+				{
 					let actual = Self::remove_suspended_keys(ring_index);
 					weight_meter.consume(actual)
 				}
@@ -539,7 +522,7 @@ pub mod pallet {
 			weight_meter.consume(on_idle_weight);
 
 			let max_ring_size = T::MaxRingSize::get();
-			let remove_people_weight = T::WeightInfo::remove_suspended_people(max_ring_size);
+			let remove_people_weight = T::WeightInfo::remove_suspended_keys(max_ring_size);
 			let rings_state = RingsState::<T>::get();
 
 			// Check if there are any rings with suspensions and try to clean as many as possible.
@@ -590,10 +573,10 @@ pub mod pallet {
 				if !weight_meter.can_consume(should_build_ring_weight) {
 					return weight_meter.consumed();
 				}
+
 				let maybe_to_include = Self::should_build_ring(ring_index, max_ring_size);
 				weight_meter.consume(should_build_ring_weight);
 				let Some(to_include) = maybe_to_include else { continue };
-
 				if !weight_meter.can_consume(build_ring_weight) {
 					return weight_meter.consumed();
 				}
@@ -620,9 +603,14 @@ pub mod pallet {
 
 	impl<T: Config> Default for GenesisConfig<T> {
 		fn default() -> Self {
-			use individuality_support::genesis::ring_verifier_builder_params_raw;
+			// The default genesis config will put in the chunks that pertain to the ring vrf
+			// implementation in the `verifiable` crate. This default config will not work for other
+			// custom `GenerateVerifiable` implementations.
+			use verifiable::ring_vrf_impl::StaticChunk;
+			let params = verifiable::ring_vrf_impl::ring_verifier_builder_params();
+			let chunks: Vec<StaticChunk> = params.0.iter().map(|c| StaticChunk(*c)).collect();
 			Self {
-				encoded_chunks: ring_verifier_builder_params_raw(),
+				encoded_chunks: chunks.encode(),
 				_phantom_data: PhantomData,
 				onboarding_size: T::MaxRingSize::get(),
 			}
@@ -725,7 +713,7 @@ pub mod pallet {
 		/// there is leftover weight in a block. This call is meant to be a backup in case of
 		/// extreme congestion and should be submitted by signed origins.
 		#[pallet::weight(T::WeightInfo::onboard_people())]
-		#[pallet::call_index(105)]
+		#[pallet::call_index(101)]
 		pub fn onboard_people_manual(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
 			ensure_signed(origin)?;
 
@@ -818,16 +806,18 @@ pub mod pallet {
 			Ok(Pays::No.into())
 		}
 
-		/// Task that merges two rings. In order for the rings to be eligible for merging, they must
-		/// be below 1/2 of max capacity, have no pending suspensions and not be the top ring used
-		/// for onboarding.
-		#[pallet::call_index(110)]
+		/// Merge the people in two rings into a single, new ring. In order for the rings to be
+		/// eligible for merging, they must be below 1/2 of max capacity, have no pending
+		/// suspensions and not be the top ring used for onboarding.
+		#[pallet::call_index(102)]
 		#[pallet::weight(T::WeightInfo::merge_rings())]
 		pub fn merge_rings(
-			_origin: OriginFor<T>,
+			origin: OriginFor<T>,
 			base_ring_index: RingIndex,
 			target_ring_index: RingIndex,
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
+			let _ = ensure_signed(origin)?;
+
 			ensure!(RingsState::<T>::get().append_only(), Error::<T>::SuspensionSessionInProgress);
 			// Top ring that onboards new candidates cannot be merged. Identical rings cannot be
 			// merged.
@@ -887,60 +877,14 @@ pub mod pallet {
 			RingKeys::<T>::remove(target_ring_index);
 			RingKeysStatus::<T>::remove(target_ring_index);
 
-			Ok(())
+			Ok(Pays::No.into())
 		}
 
-		// NOTE: This might be removed in the future. Use the `AsPerson` transaction
-		// extension to dispatch call with signature instead.
-		#[pallet::call_index(1)]
-		#[pallet::weight(T::WeightInfo::as_personal_identity().saturating_add(call.get_dispatch_info().call_weight))]
-		pub fn as_personal_identity(
-			origin: OriginFor<T>,
-			index: PersonalId,
-			call: Box<<T as frame_system::Config>::RuntimeCall>,
-			signature: <T::Crypto as GenerateVerifiable>::Signature,
-		) -> DispatchResultWithPostInfo {
-			let _ = ensure_signed(origin.clone())?;
-			let record = People::<T>::get(index).ok_or(Error::<T>::NotPerson)?;
-			let key = record.key;
-			let ok = call.using_encoded(|msg| T::Crypto::verify_signature(&signature, msg, &key));
-			ensure!(ok, Error::<T>::InvalidSignature);
-			let derivation_weight = T::WeightInfo::as_personal_identity();
-			Self::derivative_call(origin, Origin::PersonalIdentity(index), *call, derivation_weight)
-		}
-
-		// NOTE: This might be removed in the future. Use the `AsPerson` transaction
-		// extension to dispatch call with signature instead.
-		/// Generally this should not be used since it does not protect against replay attacks. If
-		/// used then it is important to use mortal transactions with a short lifespan.
-		#[pallet::call_index(2)]
-		#[pallet::weight(T::WeightInfo::as_personal_alias().saturating_add(call.get_dispatch_info().call_weight))]
-		pub fn as_personal_alias(
-			origin: OriginFor<T>,
-			context: Context,
-			call: Box<<T as frame_system::Config>::RuntimeCall>,
-			proof: <T::Crypto as GenerateVerifiable>::Proof,
-			ring_index: RingIndex,
-		) -> DispatchResultWithPostInfo {
-			let _ = ensure_signed(origin.clone())?;
-			let ring = Root::<T>::get(ring_index).ok_or(Error::<T>::NoMembers)?;
-			let alias = call
-				.using_encoded(|msg| T::Crypto::validate(&proof, &ring.root, &context, msg))
-				.map_err(|_| Error::<T>::InvalidProof)?;
-			let local_origin = Origin::PersonalAlias(RevisedContextualAlias {
-				revision: ring.revision,
-				ring: ring_index,
-				ca: ContextualAlias { alias, context },
-			});
-			let derivation_weight = T::WeightInfo::as_personal_alias();
-			Self::derivative_call(origin, local_origin, *call, derivation_weight)
-		}
-
-		// NOTE: This might be removed in the future. Use the `AsPerson` transaction
-		// extension to dispatch call with signature instead.
-		// Note this is not feeless even if the `call` is feeless. This is because we cannot
-		// easily fetch the feelessness of `call` from within our feeless condition.
-		#[pallet::call_index(3)]
+		/// Dispatch a call under an alias using the `account <-> alias` mapping.
+		///
+		/// This is a call version of the transaction extension `AsPersonalAliasWithAccount`.
+		/// It is recommended to use the transaction extension instead when suitable.
+		#[pallet::call_index(0)]
 		#[pallet::weight(T::WeightInfo::under_alias().saturating_add(call.get_dispatch_info().call_weight))]
 		pub fn under_alias(
 			origin: OriginFor<T>,
@@ -967,7 +911,7 @@ pub mod pallet {
 		/// Parameters:
 		/// - `account`: The account to set the alias for.
 		/// - `call_valid_at`: The block number when the call becomes valid.
-		#[pallet::call_index(4)]
+		#[pallet::call_index(1)]
 		#[pallet::weight(T::WeightInfo::set_alias_account())]
 		pub fn set_alias_account(
 			origin: OriginFor<T>,
@@ -1020,7 +964,8 @@ pub mod pallet {
 			}
 		}
 
-		#[pallet::call_index(5)]
+		/// Remove the mapping from a particular alias to its registered account.
+		#[pallet::call_index(2)]
 		#[pallet::weight(T::WeightInfo::unset_alias_account())]
 		pub fn unset_alias_account(origin: OriginFor<T>) -> DispatchResult {
 			let alias = Self::ensure_personal_alias(origin)?;
@@ -1031,20 +976,13 @@ pub mod pallet {
 			Ok(())
 		}
 
-		#[pallet::call_index(6)]
-		#[pallet::weight(T::WeightInfo::reset_root())]
-		pub fn reset_root(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
-			ensure_root(origin)?;
-			let _: Vec<_> = Root::<T>::drain().collect();
-			let _: Vec<_> = Keys::<T>::drain().collect();
-			let _: Vec<_> = People::<T>::drain().collect();
-			let _: Vec<_> = AliasToAccount::<T>::drain().collect();
-			let _: Vec<_> = AccountToAlias::<T>::drain().collect();
-
-			Ok(Pays::No.into())
-		}
-
-		#[pallet::call_index(7)]
+		/// Recognize a set of people without any additional checks.
+		///
+		/// The people are identified by the provided list of keys and will each be assigned, in
+		/// order, the next available personal ID.
+		///
+		/// The origin for this call must have root privileges.
+		#[pallet::call_index(3)]
 		#[pallet::weight(T::WeightInfo::force_recognize_personhood(people.len().try_into().unwrap_or(0)))]
 		pub fn force_recognize_personhood(
 			origin: OriginFor<T>,
@@ -1073,7 +1011,7 @@ pub mod pallet {
 		/// Parameters:
 		/// - `account`: The account to set the alias for.
 		/// - `call_valid_at`: The block number when the call becomes valid.
-		#[pallet::call_index(8)]
+		#[pallet::call_index(4)]
 		#[pallet::weight(T::WeightInfo::set_personal_id_account())]
 		pub fn set_personal_id_account(
 			origin: OriginFor<T>,
@@ -1106,7 +1044,7 @@ pub mod pallet {
 		}
 
 		/// Unset the personal id account.
-		#[pallet::call_index(9)]
+		#[pallet::call_index(5)]
 		#[pallet::weight(T::WeightInfo::unset_personal_id_account())]
 		pub fn unset_personal_id_account(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
 			let id = Self::ensure_personal_identity(origin)?;
@@ -1122,7 +1060,7 @@ pub mod pallet {
 		/// Migrate the key for a person who was onboarded and is currently included in a ring. The
 		/// migration is not instant as the key replacement and subsequent inclusion in a new ring
 		/// root will happen only after the next mutation session.
-		#[pallet::call_index(10)]
+		#[pallet::call_index(6)]
 		#[pallet::weight(T::WeightInfo::migrate_included_key())]
 		pub fn migrate_included_key(
 			origin: OriginFor<T>,
@@ -1166,7 +1104,7 @@ pub mod pallet {
 
 		/// Migrate the key for a person who is currently onboarding. The operation is instant,
 		/// replacing the old key in the onboarding queue.
-		#[pallet::call_index(11)]
+		#[pallet::call_index(7)]
 		#[pallet::weight(T::WeightInfo::migrate_onboarding_key())]
 		pub fn migrate_onboarding_key(
 			origin: OriginFor<T>,
@@ -1206,13 +1144,17 @@ pub mod pallet {
 		}
 
 		/// Force set the onboarding size for new people. This call requires root privileges.
-		#[pallet::call_index(50)]
+		#[pallet::call_index(8)]
 		#[pallet::weight(T::WeightInfo::set_onboarding_size())]
 		pub fn set_onboarding_size(
 			origin: OriginFor<T>,
 			onboarding_size: u32,
 		) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
+			ensure!(
+				onboarding_size <= <T as Config>::MaxRingSize::get(),
+				Error::<T>::InvalidOnboardingSize
+			);
 			OnboardingSize::<T>::put(onboarding_size);
 			Ok(Pays::No.into())
 		}
@@ -1580,7 +1522,7 @@ pub mod pallet {
 							// It is expensive to shift the whole vec in the worst case to remove a
 							// suspended person from onboarding, but the pages will be small and
 							// suspension of people who are not yet onboarded is supposed to be
-							// extremely rare if not impossible as the offchain worker should have
+							// extremely rare if not impossible as the pallet hooks should have
 							// plenty of time to include someone recognized before the beginning of
 							// the next suspension round. The only legitimate case when this could
 							// happen is if someone is sitting in the onboarding queue for a long
@@ -1782,7 +1724,7 @@ pub mod pallet {
 					.defensive_proof("cannot move more ring members than the max ring size; qed")
 					.is_err()
 				{
-					return T::WeightInfo::remove_suspended_people(
+					return T::WeightInfo::remove_suspended_keys(
 						keys_len.try_into().unwrap_or(u32::MAX),
 					);
 				}
@@ -1805,10 +1747,10 @@ pub mod pallet {
 				}
 			});
 
-			// Make sure to remove the entry from the map so that the offchain worker doesn't
-			// iterate over it.
+			// Make sure to remove the entry from the map so that the pallet hooks don't iterate
+			// over it.
 			PendingSuspensions::<T>::remove(ring_index);
-			T::WeightInfo::remove_suspended_people(keys_len.try_into().unwrap_or(u32::MAX))
+			T::WeightInfo::remove_suspended_keys(keys_len.try_into().unwrap_or(u32::MAX))
 		}
 
 		/// Merges the two pages at the front of the onboarding queue. After a round of suspensions,
@@ -1997,7 +1939,7 @@ pub mod pallet {
 			Ok(Origin::PersonalAlias(RevisedContextualAlias {
 				revision: 0,
 				ring: 0,
-				ca: ContextualAlias { alias: [0; 32], context: [0; 32] },
+				ca: ContextualAlias { alias: [1; 32], context: [0; 32] },
 			})
 			.into())
 		}
@@ -2079,7 +2021,7 @@ pub mod pallet {
 			Ok(Origin::PersonalAlias(RevisedContextualAlias {
 				revision: 0,
 				ring: 0,
-				ca: ContextualAlias { alias: [0; 32], context: [0; 32] },
+				ca: ContextualAlias { alias: [1; 32], context: [0; 32] },
 			})
 			.into())
 		}
@@ -2121,7 +2063,7 @@ pub mod pallet {
 			Ok(Origin::PersonalAlias(RevisedContextualAlias {
 				revision: 0,
 				ring: 0,
-				ca: ContextualAlias { alias: [0; 32], context: *context },
+				ca: ContextualAlias { alias: [1; 32], context: *context },
 			})
 			.into())
 		}
