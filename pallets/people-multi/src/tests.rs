@@ -32,7 +32,6 @@ use sp_runtime::{
 	transaction_validity::InvalidTransaction::{self, BadSigner},
 	DispatchResult, Weight,
 };
-use verifiable::demo_impls::Simple;
 
 fn generate_people_with_index(
 	start: u8,
@@ -41,8 +40,8 @@ fn generate_people_with_index(
 	let mut people = Vec::new();
 	for i in start..=end {
 		let person = PeoplePallet::reserve_new_id();
-		let secret = Simple::new_secret([i; 32]);
-		let public = Simple::member_from_secret(&secret);
+		let secret = MockCrypto::new_secret([i; 32]);
+		let public = MockCrypto::member_from_secret(&secret);
 
 		PeoplePallet::recognize_personhood(person, Some(public)).unwrap();
 		people.push((person, public, secret));
@@ -117,12 +116,23 @@ fn build_ring_works() {
 }
 
 #[test]
+fn recognize_invalid_key_fails() {
+	TestExt::new().execute_with(|| {
+		let id = PeoplePallet::reserve_new_id();
+		assert_noop!(
+			PeoplePallet::recognize_personhood(id, Some(INVALID_MEMBER)),
+			Error::<Test>::InvalidMemberKey
+		);
+	});
+}
+
+#[test]
 fn recognize_person_with_duplicate_key() {
 	TestExt::new().execute_with(|| {
 		// Recognize person A with a key.
 		let person_a = PeoplePallet::reserve_new_id();
-		let secret_a = Simple::new_secret([1; 32]);
-		let key_a = Simple::member_from_secret(&secret_a);
+		let secret_a = MockCrypto::new_secret([1; 32]);
+		let key_a = MockCrypto::member_from_secret(&secret_a);
 		PeoplePallet::recognize_personhood(person_a, Some(key_a)).unwrap();
 
 		// Recognize person B with the same key.
@@ -138,8 +148,8 @@ fn recognize_person_with_duplicate_key() {
 fn recognize_same_person_2_times() {
 	TestExt::new().execute_with(|| {
 		let person_a = PeoplePallet::reserve_new_id();
-		let secret_a = Simple::new_secret([1; 32]);
-		let key_a = Simple::member_from_secret(&secret_a);
+		let secret_a = MockCrypto::new_secret([1; 32]);
+		let key_a = MockCrypto::member_from_secret(&secret_a);
 		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_a)));
 		assert!(People::<Test>::get(person_a).is_some());
 		assert_noop!(
@@ -162,12 +172,12 @@ fn recognize_person_with_duplicate_key_after_suspend() {
 		let person_a = PeoplePallet::reserve_new_id();
 		let person_b = PeoplePallet::reserve_new_id();
 		let person_c = PeoplePallet::reserve_new_id();
-		let secret_a = Simple::new_secret([1; 32]);
-		let secret_b = Simple::new_secret([2; 32]);
-		let secret_c = Simple::new_secret([3; 32]);
-		let key_a = Simple::member_from_secret(&secret_a);
-		let key_b = Simple::member_from_secret(&secret_b);
-		let key_c = Simple::member_from_secret(&secret_c);
+		let secret_a = MockCrypto::new_secret([1; 32]);
+		let secret_b = MockCrypto::new_secret([2; 32]);
+		let secret_c = MockCrypto::new_secret([3; 32]);
+		let key_a = MockCrypto::member_from_secret(&secret_a);
+		let key_b = MockCrypto::member_from_secret(&secret_b);
+		let key_c = MockCrypto::member_from_secret(&secret_c);
 		// Recognize person A and B
 		assert_ok!(PeoplePallet::recognize_personhood(person_a, Some(key_a)));
 		// Onboard A so that they become part of a ring.
@@ -287,14 +297,18 @@ fn id_reservation_works() {
 #[test]
 fn force_recognize_personhood_works() {
 	TestExt::new().execute_with(|| {
-		use verifiable::demo_impls::Simple;
+		// Force recognize an invalid key fails.
+		assert_noop!(
+			PeoplePallet::force_recognize_personhood(RuntimeOrigin::root(), vec![INVALID_MEMBER]),
+			Error::<Test>::InvalidMemberKey,
+		);
 
 		// We'll create 5 new people to recognize.
 		let num_people = 5;
 		let mut keys = Vec::new();
 		for i in 0..num_people {
-			let secret = Simple::new_secret([i as u8; 32]);
-			let public_key = Simple::member_from_secret(&secret);
+			let secret = MockCrypto::new_secret([i as u8; 32]);
+			let public_key = MockCrypto::member_from_secret(&secret);
 			keys.push(public_key);
 		}
 
@@ -330,8 +344,8 @@ fn force_recognize_personhood_works() {
 
 		// Fails for duplicate keys.
 		let another_key = {
-			let secret = Simple::new_secret([233; 32]);
-			Simple::member_from_secret(&secret)
+			let secret = MockCrypto::new_secret([233; 32]);
+			MockCrypto::member_from_secret(&secret)
 		};
 		assert_noop!(
 			PeoplePallet::force_recognize_personhood(
@@ -717,7 +731,7 @@ mod manual_tasks {
 		TestExt::new().execute_with(|| {
 			// Set-up to make the checks validating the need of ring build pass
 			OnboardingSize::<Test>::set(1);
-			let member_key = Simple::member_from_secret(&Simple::new_secret([0u8; 32]));
+			let member_key = MockCrypto::member_from_secret(&MockCrypto::new_secret([0u8; 32]));
 			let keys: BoundedVec<MemberOf<Test>, <Test as Config>::MaxRingSize> =
 				BoundedVec::try_from(vec![member_key]).expect("failed to init members");
 			let ring_status = RingStatus { total: keys.len().saturated_into(), included: 0 };
@@ -1237,8 +1251,8 @@ mod key_migration {
 	#[test]
 	fn migrate_key_fails_without_old_key() {
 		TestExt::new().execute_with(|| {
-			let secret = Simple::new_secret([0; 32]);
-			let public = Simple::member_from_secret(&secret);
+			let secret = MockCrypto::new_secret([0; 32]);
+			let public = MockCrypto::member_from_secret(&secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_noop!(
 				PeoplePallet::migrate_included_key(origin, public),
@@ -1313,8 +1327,8 @@ mod key_migration {
 			PeoplePallet::remove_suspended_keys(RI_ZERO);
 
 			assert!(matches!(People::<Test>::get(3).unwrap().position, RingPosition::Suspended));
-			let new_secret = Simple::new_secret([100; 32]);
-			let new_public = Simple::member_from_secret(&new_secret);
+			let new_secret = MockCrypto::new_secret([100; 32]);
+			let new_public = MockCrypto::member_from_secret(&new_secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_noop!(
 				PeoplePallet::migrate_included_key(origin, new_public),
@@ -1340,8 +1354,8 @@ mod key_migration {
 					scheduled_for_removal: false
 				}
 			));
-			let temp_secret = Simple::new_secret([100; 32]);
-			let temp_public = Simple::member_from_secret(&temp_secret);
+			let temp_secret = MockCrypto::new_secret([100; 32]);
+			let temp_public = MockCrypto::member_from_secret(&temp_secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_ok!(PeoplePallet::migrate_included_key(origin, temp_public));
 			assert_eq!(KeyMigrationQueue::<Test>::get(3).unwrap(), temp_public);
@@ -1360,8 +1374,8 @@ mod key_migration {
 			assert_eq!(Keys::<Test>::get(temp_public).unwrap(), 3);
 			assert_eq!(Keys::<Test>::get(initial_record.key).unwrap(), 3);
 
-			let new_secret = Simple::new_secret([101; 32]);
-			let new_public = Simple::member_from_secret(&new_secret);
+			let new_secret = MockCrypto::new_secret([101; 32]);
+			let new_public = MockCrypto::member_from_secret(&new_secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 
 			assert_ok!(PeoplePallet::migrate_included_key(origin, new_public));
@@ -1396,8 +1410,8 @@ mod key_migration {
 				.iter()
 				.position(|k| *k == initial_record.key)
 				.unwrap();
-			let new_secret = Simple::new_secret([100; 32]);
-			let new_public = Simple::member_from_secret(&new_secret);
+			let new_secret = MockCrypto::new_secret([100; 32]);
+			let new_public = MockCrypto::member_from_secret(&new_secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(13));
 			assert_ok!(PeoplePallet::migrate_onboarding_key(origin, new_public));
 
@@ -1409,8 +1423,8 @@ mod key_migration {
 			assert!(!Keys::<Test>::contains_key(initial_record.key));
 
 			// Calling it again with a different key replaces the previous one.
-			let new_secret = Simple::new_secret([101; 32]);
-			let new_public = Simple::member_from_secret(&new_secret);
+			let new_secret = MockCrypto::new_secret([101; 32]);
+			let new_public = MockCrypto::member_from_secret(&new_secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(13));
 			let temp_record = personal_record;
 			assert_ok!(PeoplePallet::migrate_onboarding_key(origin, new_public));
@@ -1428,8 +1442,8 @@ mod key_migration {
 			assert_ok!(PeoplePallet::onboard_people());
 			assert_ok!(build_ring(RI_ZERO, None));
 
-			let new_secret = Simple::new_secret([100; 32]);
-			let new_public = Simple::member_from_secret(&new_secret);
+			let new_secret = MockCrypto::new_secret([100; 32]);
+			let new_public = MockCrypto::member_from_secret(&new_secret);
 
 			let initial_record = People::<Test>::get(13).unwrap();
 			assert!(matches!(initial_record.position, RingPosition::Onboarding { queue_page: 0 }));
@@ -1456,8 +1470,8 @@ mod key_migration {
 
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_ok!(PeoplePallet::migrate_included_key(origin, new_public));
-			let new_secret = Simple::new_secret([101; 32]);
-			let new_public = Simple::member_from_secret(&new_secret);
+			let new_secret = MockCrypto::new_secret([101; 32]);
+			let new_public = MockCrypto::member_from_secret(&new_secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(13));
 			assert_ok!(PeoplePallet::migrate_onboarding_key(origin, new_public));
 		});
@@ -1481,8 +1495,8 @@ mod key_migration {
 					scheduled_for_removal: false
 				}
 			));
-			let secret1 = Simple::new_secret([100; 32]);
-			let public1 = Simple::member_from_secret(&secret1);
+			let secret1 = MockCrypto::new_secret([100; 32]);
+			let public1 = MockCrypto::member_from_secret(&secret1);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_ok!(PeoplePallet::migrate_included_key(origin, public1));
 
@@ -1499,8 +1513,8 @@ mod key_migration {
 			assert!(matches!(new_record.position, RingPosition::Onboarding { queue_page: 0 }));
 			assert_eq!(suspended_indices_list(RI_ZERO).into_inner(), vec![3]);
 
-			let secret2 = Simple::new_secret([101; 32]);
-			let public2 = Simple::member_from_secret(&secret2);
+			let secret2 = MockCrypto::new_secret([101; 32]);
+			let public2 = MockCrypto::member_from_secret(&secret2);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(4));
 			assert_ok!(PeoplePallet::migrate_included_key(origin, public2));
 			assert_eq!(KeyMigrationQueue::<Test>::get(4).unwrap(), public2);
@@ -1536,8 +1550,8 @@ mod key_migration {
 					scheduled_for_removal: false
 				}
 			));
-			let secret1 = Simple::new_secret([100; 32]);
-			let public1 = Simple::member_from_secret(&secret1);
+			let secret1 = MockCrypto::new_secret([100; 32]);
+			let public1 = MockCrypto::member_from_secret(&secret1);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_ok!(PeoplePallet::migrate_included_key(origin.clone(), public1));
 
@@ -1557,8 +1571,8 @@ mod key_migration {
 
 			// Migrate another key without removing the other key.
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(4));
-			let secret2 = Simple::new_secret([101; 32]);
-			let public2 = Simple::member_from_secret(&secret2);
+			let secret2 = MockCrypto::new_secret([101; 32]);
+			let public2 = MockCrypto::member_from_secret(&secret2);
 			assert_ok!(PeoplePallet::migrate_included_key(origin, public2));
 
 			assert_ok!(PeoplePallet::start_people_set_mutation_session());
@@ -1590,8 +1604,8 @@ mod key_migration {
 					scheduled_for_removal: false
 				}
 			));
-			let secret1 = Simple::new_secret([100; 32]);
-			let public1 = Simple::member_from_secret(&secret1);
+			let secret1 = MockCrypto::new_secret([100; 32]);
+			let public1 = MockCrypto::member_from_secret(&secret1);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_ok!(PeoplePallet::migrate_included_key(origin.clone(), public1));
 
@@ -1610,8 +1624,8 @@ mod key_migration {
 			PeoplePallet::remove_suspended_keys(RI_ZERO);
 			assert!(suspended_indices_list(RI_ZERO).is_empty());
 
-			let secret2 = Simple::new_secret([101; 32]);
-			let public2 = Simple::member_from_secret(&secret2);
+			let secret2 = MockCrypto::new_secret([101; 32]);
+			let public2 = MockCrypto::member_from_secret(&secret2);
 			assert_noop!(
 				PeoplePallet::migrate_included_key(origin, public2),
 				Error::<Test>::Suspended
@@ -1637,8 +1651,8 @@ mod key_migration {
 					scheduled_for_removal: false
 				}
 			));
-			let secret1 = Simple::new_secret([100; 32]);
-			let public1 = Simple::member_from_secret(&secret1);
+			let secret1 = MockCrypto::new_secret([100; 32]);
+			let public1 = MockCrypto::member_from_secret(&secret1);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(3));
 			assert_ok!(PeoplePallet::migrate_included_key(origin.clone(), public1));
 
@@ -1680,8 +1694,8 @@ mod key_migration {
 			let old_keys = RingKeys::<Test>::get(RI_ZERO);
 
 			let new_keys: Vec<_> = (100..110)
-				.map(|x| Simple::new_secret([x; 32]))
-				.map(|s| Simple::member_from_secret(&s))
+				.map(|x| MockCrypto::new_secret([x; 32]))
+				.map(|s| MockCrypto::member_from_secret(&s))
 				.collect();
 
 			let static_people: Vec<PersonalId> = (0..10).filter(|i| i % 3 == 2).collect();
@@ -2452,8 +2466,8 @@ mod poll {
 			assert_ok!(build_ring(RI_ZERO, None));
 
 			for i in 0..5 {
-				let new_secret = Simple::new_secret([100 + i; 32]);
-				let new_public = Simple::member_from_secret(&new_secret);
+				let new_secret = MockCrypto::new_secret([100 + i; 32]);
+				let new_public = MockCrypto::member_from_secret(&new_secret);
 				let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(i as PersonalId));
 				assert_ok!(PeoplePallet::migrate_included_key(origin, new_public));
 				assert_eq!(KeyMigrationQueue::<Test>::get(i as PersonalId).unwrap(), new_public);
@@ -2621,8 +2635,8 @@ fn on_poll_works() {
 		assert_eq!(QueuePageIndices::<Test>::get(), (0, 2));
 
 		for i in 0..5 {
-			let new_secret = Simple::new_secret([250 + i; 32]);
-			let new_public = Simple::member_from_secret(&new_secret);
+			let new_secret = MockCrypto::new_secret([250 + i; 32]);
+			let new_public = MockCrypto::member_from_secret(&new_secret);
 			let origin = RuntimeOrigin::from(PeopleOrigin::PersonalIdentity(i as PersonalId));
 			assert_ok!(PeoplePallet::migrate_included_key(origin, new_public));
 			assert_eq!(KeyMigrationQueue::<Test>::get(i as PersonalId).unwrap(), new_public);
@@ -2863,8 +2877,8 @@ fn replay_protection_for_identity() {
 	new_test_ext().execute_with(|| {
 		const EXTENSION_VERSION: u8 = 0;
 		// Setup alice as a member.
-		let alice_sec = Simple::new_secret([1u8; 32]);
-		let alice_pub = Simple::member_from_secret(&alice_sec);
+		let alice_sec = MockCrypto::new_secret([1u8; 32]);
+		let alice_pub = MockCrypto::member_from_secret(&alice_sec);
 		let alice_index = PeoplePallet::reserve_new_id();
 		PeoplePallet::recognize_personhood(alice_index, Some(alice_pub)).unwrap();
 		let generate_setup_account_tx_ext_for_call = |call: RuntimeCall| {
@@ -2872,7 +2886,7 @@ fn replay_protection_for_identity() {
 			// Here we simply ignore implicit as they are null.
 			let msg = (&EXTENSION_VERSION, &call, &other_tx_ext)
 				.using_encoded(sp_io::hashing::blake2_256);
-			let signature = Simple::sign(&alice_sec, &msg).unwrap();
+			let signature = MockCrypto::sign(&alice_sec, &msg).unwrap();
 			(
 				AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalIdentityWithProof(
 					signature,
@@ -2937,8 +2951,8 @@ fn replay_protection_for_alias() {
 		const EXTENSION_VERSION: u8 = 0;
 		// Setup Alice as a member.
 		PeoplePallet::set_onboarding_size(RuntimeOrigin::root(), 1).unwrap();
-		let alice_sec = Simple::new_secret([1u8; 32]);
-		let alice_pub = Simple::member_from_secret(&alice_sec);
+		let alice_sec = MockCrypto::new_secret([1u8; 32]);
+		let alice_pub = MockCrypto::member_from_secret(&alice_sec);
 		let alice_index = PeoplePallet::reserve_new_id();
 		PeoplePallet::recognize_personhood(alice_index, Some(alice_pub)).unwrap();
 		assert_ok!(PeoplePallet::onboard_people());
@@ -2949,10 +2963,10 @@ fn replay_protection_for_alias() {
 			let msg = (&EXTENSION_VERSION, &call, &other_tx_ext)
 				.using_encoded(sp_io::hashing::blake2_256);
 			// Open a commitment (using Alice’s public key and public data)
-			let commitment = Simple::open(&alice_pub, Some(alice_pub).into_iter()).unwrap();
+			let commitment = MockCrypto::open(&alice_pub, Some(alice_pub).into_iter()).unwrap();
 			// Create a VRF proof and compute the alias output from the call message.
 			let (proof, alias_value) =
-				Simple::create(commitment, &alice_sec, &MOCK_CONTEXT, &msg).unwrap();
+				MockCrypto::create(commitment, &alice_sec, &MOCK_CONTEXT, &msg).unwrap();
 			let alias = ContextualAlias { context: MOCK_CONTEXT, alias: alias_value };
 			let tx_ext = (
 				AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalAliasWithProof(

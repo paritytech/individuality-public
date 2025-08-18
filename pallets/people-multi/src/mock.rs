@@ -31,7 +31,7 @@ use sp_runtime::{
 	transaction_validity::{InvalidTransaction, TransactionSource, TransactionValidityError},
 	BuildStorage, DispatchError, Weight,
 };
-use verifiable::demo_impls::Simple;
+use verifiable::{demo_impls::Simple, GenerateVerifiable};
 
 // First ring, used in testing.
 pub const RI_ZERO: RingIndex = 0;
@@ -207,9 +207,99 @@ impl crate::WeightInfo for MockWeights {
 	}
 }
 
+pub const INVALID_MEMBER: [u8; 32] = [
+	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+	27, 28, 29, 30, 31, 32,
+];
+
+/// A mock crypto implementation that implements same as `Simple` but `INVALID_MEMBER` is not a
+/// valid member.
+pub struct MockCrypto;
+
+impl GenerateVerifiable for MockCrypto {
+	type Proof = <Simple as GenerateVerifiable>::Proof;
+	type Member = <Simple as GenerateVerifiable>::Member;
+	type Secret = <Simple as GenerateVerifiable>::Secret;
+	type Members = <Simple as GenerateVerifiable>::Members;
+	type Signature = <Simple as GenerateVerifiable>::Signature;
+	type Commitment = <Simple as GenerateVerifiable>::Commitment;
+	type StaticChunk = <Simple as GenerateVerifiable>::StaticChunk;
+	type Intermediate = <Simple as GenerateVerifiable>::Intermediate;
+	fn open(
+		member: &Self::Member,
+		members_iter: impl Iterator<Item = Self::Member>,
+	) -> Result<Self::Commitment, ()> {
+		Simple::open(member, members_iter)
+	}
+	fn sign(secret: &Self::Secret, message: &[u8]) -> Result<Self::Signature, ()> {
+		Simple::sign(secret, message)
+	}
+	fn create(
+		commitment: Self::Commitment,
+		secret: &Self::Secret,
+		context: &[u8],
+		message: &[u8],
+	) -> Result<(Self::Proof, Alias), ()> {
+		Simple::create(commitment, secret, context, message)
+	}
+	fn is_valid(
+		proof: &Self::Proof,
+		members: &Self::Members,
+		context: &[u8],
+		alias: &Alias,
+		message: &[u8],
+	) -> bool {
+		Simple::is_valid(proof, members, context, alias, message)
+	}
+	fn validate(
+		proof: &Self::Proof,
+		members: &Self::Members,
+		context: &[u8],
+		message: &[u8],
+	) -> Result<Alias, ()> {
+		Simple::validate(proof, members, context, message)
+	}
+	fn new_secret(entropy: verifiable::Entropy) -> Self::Secret {
+		Simple::new_secret(entropy)
+	}
+	fn push_members(
+		intermediate: &mut Self::Intermediate,
+		members: impl Iterator<Item = Self::Member>,
+		lookup: impl Fn(Range<usize>) -> Result<Vec<Self::StaticChunk>, ()>,
+	) -> Result<(), ()> {
+		Simple::push_members(intermediate, members, lookup)
+	}
+	fn start_members() -> Self::Intermediate {
+		Simple::start_members()
+	}
+	fn finish_members(inter: Self::Intermediate) -> Self::Members {
+		Simple::finish_members(inter)
+	}
+	fn is_member_valid(member: &Self::Member) -> bool {
+		if *member == INVALID_MEMBER {
+			return false;
+		}
+
+		Simple::is_member_valid(member)
+	}
+	fn alias_in_context(secret: &Self::Secret, context: &[u8]) -> Result<Alias, ()> {
+		Simple::alias_in_context(secret, context)
+	}
+	fn verify_signature(
+		signature: &Self::Signature,
+		message: &[u8],
+		member: &Self::Member,
+	) -> bool {
+		Simple::verify_signature(signature, message, member)
+	}
+	fn member_from_secret(secret: &Self::Secret) -> Self::Member {
+		Simple::member_from_secret(secret)
+	}
+}
+
 impl crate::Config for Test {
 	type WeightInfo = MockWeights;
-	type Crypto = verifiable::demo_impls::Simple;
+	type Crypto = MockCrypto;
 	type AccountContexts = TestAccountContexts;
 	type ChunkPageSize = ConstU32<5>;
 	type MaxRingSize = MaxRingSize;
@@ -225,7 +315,7 @@ pub struct BenchHelper {}
 #[cfg(feature = "runtime-benchmarks")]
 impl<Chunk> BenchmarkHelper<Chunk> for BenchHelper
 where
-	Chunk: From<<verifiable::demo_impls::Simple as verifiable::GenerateVerifiable>::StaticChunk>,
+	Chunk: From<<MockCrypto as verifiable::GenerateVerifiable>::StaticChunk>,
 {
 	fn valid_account_context() -> Context {
 		MOCK_CONTEXT
@@ -266,8 +356,7 @@ impl TestExt {
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
-	let chunks: Vec<<verifiable::demo_impls::Simple as GenerateVerifiable>::StaticChunk> =
-		[(); 512].to_vec();
+	let chunks: Vec<<MockCrypto as GenerateVerifiable>::StaticChunk> = [(); 512].to_vec();
 	let encoded_chunks = chunks.encode();
 
 	RuntimeGenesisConfig {
@@ -358,8 +447,8 @@ pub fn exec_as_alias_tx(
 /// Execute a transaction with the revised contextual alias origin with a revision update.
 pub fn exec_as_alias_with_updated_revision_tx(
 	who: u64,
-	key: &<Simple as GenerateVerifiable>::Member,
-	secret: &<Simple as GenerateVerifiable>::Secret,
+	key: &<MockCrypto as GenerateVerifiable>::Member,
+	secret: &<MockCrypto as GenerateVerifiable>::Secret,
 	call: impl Into<RuntimeCall>,
 ) -> Result<(), TransactionExecutionError> {
 	let nonce = frame_system::Account::<Test>::get(who).nonce;
@@ -369,7 +458,7 @@ pub fn exec_as_alias_with_updated_revision_tx(
 	let ring_index = record.position.ring_index().unwrap();
 	let commitment = {
 		let all_keys = crate::RingKeys::<Test>::get(ring_index);
-		Simple::open(key, all_keys.into_iter()).unwrap()
+		MockCrypto::open(key, all_keys.into_iter()).unwrap()
 	};
 	let call: RuntimeCall = call.into();
 	let other_tx_ext = (frame_system::CheckNonce::<Test>::from(0),);
@@ -377,7 +466,7 @@ pub fn exec_as_alias_with_updated_revision_tx(
 	let inherited_implication = (&EXTENSION_VERSION, &call, &other_tx_ext);
 	let msg =
 		(inherited_implication, "revise", &who, nonce).using_encoded(sp_io::hashing::blake2_256);
-	let (proof, _alias) = Simple::create(commitment, secret, &rev_ca.ca.context, &msg)
+	let (proof, _alias) = MockCrypto::create(commitment, secret, &rev_ca.ca.context, &msg)
 		.expect("proof creation failed");
 	let tx_ext = (
 		AsPerson::new(Some(AsPersonInfo::AsPersonalAliasWithAccountRevised(
@@ -394,8 +483,8 @@ pub fn exec_as_alias_with_updated_revision_tx(
 
 /// Call `set_alias_account` for the given personal id and account.
 pub fn setup_alias_account(
-	key: &<Simple as GenerateVerifiable>::Member,
-	secret: &<Simple as GenerateVerifiable>::Secret,
+	key: &<MockCrypto as GenerateVerifiable>::Member,
+	secret: &<MockCrypto as GenerateVerifiable>::Secret,
 	context: Context,
 	account: u64,
 ) {
@@ -404,7 +493,7 @@ pub fn setup_alias_account(
 	let ring_index = record.position.ring_index().expect("person not included in a ring");
 	let commitment = {
 		let all_keys = crate::RingKeys::<Test>::get(ring_index);
-		Simple::open(key, all_keys.into_iter()).unwrap()
+		MockCrypto::open(key, all_keys.into_iter()).unwrap()
 	};
 	let call = RuntimeCall::PeoplePallet(crate::Call::set_alias_account {
 		account,
@@ -414,7 +503,7 @@ pub fn setup_alias_account(
 	// Here we simply ignore implicit as they are null.
 	let msg = (&EXTENSION_VERSION, &call, &other_tx_ext).using_encoded(sp_io::hashing::blake2_256);
 	let (proof, _alias) =
-		Simple::create(commitment, secret, &context, &msg).expect("proof creation failed");
+		MockCrypto::create(commitment, secret, &context, &msg).expect("proof creation failed");
 	let tx_ext = (
 		AsPerson::<Test>::new(Some(AsPersonInfo::AsPersonalAliasWithProof(
 			proof, ring_index, context,

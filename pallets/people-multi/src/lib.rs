@@ -443,6 +443,8 @@ pub mod pallet {
 		KeyAlreadySuspended,
 		/// The onboarding size must not exceed the maximum ring size.
 		InvalidOnboardingSize,
+		/// The member key is not valid for the crypto.
+		InvalidMemberKey,
 	}
 
 	#[pallet::origin]
@@ -1301,7 +1303,9 @@ pub mod pallet {
 					.cloned(),
 				Self::fetch_chunks,
 			)
-			.defensive()
+			.defensive_proof(
+				"Members are valid, no duplication, maximum is not reached, lookup is valid",
+			)
 			.map_err(|_| Error::<T>::CouldNotPush)?;
 
 			// By the end of the loop, we have included the maximum number of keys in the vector.
@@ -1484,6 +1488,8 @@ pub mod pallet {
 
 		// This allows us to associate a key with a person.
 		pub fn do_insert_key(who: PersonalId, key: MemberOf<T>) -> DispatchResult {
+			// Ensure the key is valid.
+			ensure!(T::Crypto::is_member_valid(&key), Error::<T>::InvalidMemberKey);
 			// If the key is already in use by another person then error.
 			ensure!(!Keys::<T>::contains_key(&key), Error::<T>::KeyAlreadyInUse);
 			// This is a first time key, so it must be reserved.
