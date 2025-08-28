@@ -1721,17 +1721,48 @@ pub mod pallet {
 			// Construct the new keys map by skipping the suspended keys. This should prevent
 			// reallocations in the `Vec` which happens with `remove`.
 			let mut new_keys: BoundedVec<MemberOf<T>, T::MaxRingSize> = Default::default();
+			// We will use `i` to go through the old keys list and `j` to progress through the
+			// suspended indices.
 			let mut j = 0;
 			for (i, key) in keys.into_iter().enumerate() {
 				if j < suspended_indices.len() && i == suspended_indices[j] as usize {
 					j += 1;
-				} else if new_keys
+					continue;
+				}
+
+				if let Some(personal_id) = Keys::<T>::get(&key)
+					.defensive_proof("pallet-people: keys has a person associated")
+				{
+					if let Some(mut record) = People::<T>::get(personal_id)
+						.defensive_proof("pallet-people: person with key has a record")
+					{
+						if let RingPosition::Included {
+							ring_index: record_ring_index,
+							ring_position,
+							scheduled_for_removal: _,
+						} = &mut record.position
+						{
+							if ring_index != *record_ring_index {
+								defensive!(
+									"Attempt to remove included person {:?} from a different ring",
+									personal_id,
+								);
+							} else {
+								*ring_position =
+									new_keys.len().try_into().unwrap_or(T::MaxRingSize::get());
+								People::<T>::insert(personal_id, record);
+							}
+						}
+					}
+				}
+
+				if new_keys
 					.try_push(key)
 					.defensive_proof("cannot move more ring members than the max ring size; qed")
 					.is_err()
 				{
 					return T::WeightInfo::remove_suspended_keys(
-						keys_len.try_into().unwrap_or(u32::MAX),
+						keys_len.try_into().unwrap_or(T::MaxRingSize::get()),
 					);
 				}
 			}
@@ -1743,6 +1774,14 @@ pub mod pallet {
 				ring_status.included = 0;
 				suspended_count
 			});
+			if suspended_count !=
+				suspended_indices.len().try_into().unwrap_or(T::MaxRingSize::get())
+			{
+				defensive!(
+					"Actual suspended count {:?} is less than what was queued",
+					suspended_count
+				);
+			}
 			ActiveMembers::<T>::mutate(|active| *active = active.saturating_sub(suspended_count));
 			RingKeys::<T>::insert(ring_index, new_keys);
 			Root::<T>::mutate(ring_index, |maybe_root| {
@@ -1756,7 +1795,9 @@ pub mod pallet {
 			// Make sure to remove the entry from the map so that the pallet hooks don't iterate
 			// over it.
 			PendingSuspensions::<T>::remove(ring_index);
-			T::WeightInfo::remove_suspended_keys(keys_len.try_into().unwrap_or(u32::MAX))
+			T::WeightInfo::remove_suspended_keys(
+				keys_len.try_into().unwrap_or(T::MaxRingSize::get()),
+			)
 		}
 
 		/// Merges the two pages at the front of the onboarding queue. After a round of suspensions,
