@@ -74,8 +74,12 @@ pub enum AsPersonInfo<T: Config + Send + Sync> {
 	/// The nonce must be the nonce of the account of the signer.
 	/// The proof must be created using the same key and context of the alias which is associated
 	/// with the account, but must take into account any changes related to the ring and its
-	/// revision. The proof message is created by hashing the encoded bytes of the
-	/// inherited_implication, the byte sequence "revise", the alias account and the account nonce.
+	/// revision. The proof message is created by hashing with blake2 256 the encoded tuple of:
+	/// * the inherited_implication,
+	/// * the string "revise" (so length in compact encoding is prepend),
+	/// * the alias account
+	/// * and the account nonce.
+	///
 	/// The ring index must be the index of the ring to which the person is assigned at the time of
 	/// dispatch.
 	/// The context must be the same context that was used when establishing the alias <-> account
