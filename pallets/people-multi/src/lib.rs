@@ -1967,7 +1967,12 @@ pub mod pallet {
 
 	impl<T: Config> CountedMembers for EnsurePersonalIdentity<T> {
 		fn active_count() -> u32 {
-			Keys::<T>::count()
+			ActiveMembers::<T>::get()
+		}
+
+		#[cfg(feature = "runtime-benchmarks")]
+		fn set_active_count(count: u32) {
+			ActiveMembers::<T>::put(count)
 		}
 	}
 
@@ -2002,6 +2007,11 @@ pub mod pallet {
 		fn active_count() -> u32 {
 			ActiveMembers::<T>::get()
 		}
+
+		#[cfg(feature = "runtime-benchmarks")]
+		fn set_active_count(count: u32) {
+			ActiveMembers::<T>::put(count)
+		}
 	}
 
 	/// Guard to ensure that the given origin is a person. The alias of the person within the
@@ -2031,6 +2041,11 @@ pub mod pallet {
 	impl<T: Config> CountedMembers for EnsurePersonalAliasInContext<T> {
 		fn active_count() -> u32 {
 			ActiveMembers::<T>::get()
+		}
+
+		#[cfg(feature = "runtime-benchmarks")]
+		fn set_active_count(count: u32) {
+			ActiveMembers::<T>::put(count)
 		}
 	}
 
@@ -2084,6 +2099,11 @@ pub mod pallet {
 		fn active_count() -> u32 {
 			ActiveMembers::<T>::get()
 		}
+
+		#[cfg(feature = "runtime-benchmarks")]
+		fn set_active_count(count: u32) {
+			ActiveMembers::<T>::put(count)
+		}
 	}
 
 	/// Guard to ensure that the given origin is a person.
@@ -2119,6 +2139,11 @@ pub mod pallet {
 	impl<T: Config> CountedMembers for EnsureRevisedPersonalAliasInContext<T> {
 		fn active_count() -> u32 {
 			ActiveMembers::<T>::get()
+		}
+
+		#[cfg(feature = "runtime-benchmarks")]
+		fn set_active_count(count: u32) {
+			ActiveMembers::<T>::put(count)
 		}
 	}
 }
