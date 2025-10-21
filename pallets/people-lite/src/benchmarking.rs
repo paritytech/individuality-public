@@ -34,12 +34,14 @@ use sp_runtime::traits::{
 )]
 mod benches {
 	use super::*;
-	use frame_benchmarking::v2::{account, whitelisted_caller};
 
 	fn insert_lite_person<T: Config>(who: &T::AccountId) {
 		let ring_vrf_key: crate::MemberOf<T> =
 			Decode::decode(&mut TrailingZeroInput::zeroes()).expect("decode member");
-		let info = crate::LitePersonInfo { ring_vrf_key, special_key: [0u8; 32] };
+		let info = crate::LitePersonInfo {
+			ring_vrf_key,
+			method: RecognitionMethod::UniqueDevice(whitelisted_caller()),
+		};
 		crate::LitePeople::<T>::insert(who, info);
 	}
 
@@ -72,57 +74,6 @@ mod benches {
 	}
 
 	#[benchmark]
-	fn as_lite_person_registration_tx_ext() -> Result<(), BenchmarkError> {
-		let who: T::AccountId = whitelisted_caller();
-		let verifier: T::AccountId = account("verifier", 0, 0);
-		let att: crate::pallet::AttestationOf<T> = account("att", 0, 0);
-
-		// Seed the invite (unclaimed attestation).
-		crate::pallet::UnclaimedAttestations::<T>::insert(&verifier, &att, ());
-
-		// Build a valid Ring-VRF ownership proof for the registration message.
-		let secret = <T as crate::Config>::Crypto::new_secret([42u8; 32]);
-		let ring_vrf_key = <T as crate::Config>::Crypto::member_from_secret(&secret);
-		let msg =
-			who.using_encoded(|b| [&crate::pallet::PROOF_OF_OWNERSHIP_PREFIX[..], b].concat());
-		let proof_of_ownership = <T as crate::Config>::Crypto::sign(&secret, &msg[..])
-			.map_err(|_| BenchmarkError::Weightless)?;
-
-		// Craft an attestation signature that verifies in the test runtime (UintAuthorityId).
-		// This decodes the attestation AccountId into the signature type.
-		let attestation_signature: <T as crate::Config>::AttestationSignature =
-			Decode::decode(&mut &att.encode()[..]).map_err(|_| BenchmarkError::Weightless)?;
-
-		// Construct the register call.
-		let call: <T as frame_system::Config>::RuntimeCall = crate::Call::<T>::register {
-			ring_vrf_key,
-			special_key: [0u8; 32],
-			proof_of_ownership,
-			verifier: verifier.clone(),
-			attestation: att.clone(),
-			attestation_signature,
-		}
-		.into();
-		let len = call.encode().len();
-
-		// Build the extension in the registration mode.
-		let auth = crate::PeopleLiteAuth::<T>::new(Some(
-			crate::PeopleLiteAuthData::AsLitePersonRegistration { nonce: 0u32.into() },
-		));
-
-		let origin = SystemOrigin::Signed(who.clone()).into();
-
-		#[block]
-		{
-			auth.test_run(origin, &call, &Default::default(), len, 0, |_| Ok(Default::default()))
-				.unwrap()
-				.unwrap();
-		}
-
-		Ok(())
-	}
-
-	#[benchmark]
 	fn increase_attestation_allowance() -> Result<(), BenchmarkError> {
 		let verifier: T::AccountId = whitelisted_caller();
 		let count: u32 = 50;
@@ -140,15 +91,10 @@ mod benches {
 
 		// Seed some allowance and `n` unclaimed attestations so we measure the linear clear.
 		crate::AttestationAllowance::<T>::insert(&verifier, 999_u32);
-		for i in 0..n {
-			let att: crate::AttestationOf<T> = account("att", i, 0);
-			crate::UnclaimedAttestations::<T>::insert(&verifier, &att, ());
-		}
 
 		#[extrinsic_call]
-		_(RawOrigin::Root, verifier.clone(), n);
+		_(RawOrigin::Root, verifier.clone());
 
-		assert_eq!(crate::UnclaimedAttestations::<T>::iter_prefix(&verifier).count(), 0);
 		assert!(!crate::AttestationAllowance::<T>::contains_key(&verifier));
 		Ok(())
 	}
@@ -156,68 +102,34 @@ mod benches {
 	#[benchmark]
 	fn set_attestation() -> Result<(), BenchmarkError> {
 		let attester: T::AccountId = whitelisted_caller();
-		let att: crate::AttestationOf<T> = account("att", 0, 0);
+
+		let (att, _) = T::BenchmarkHelper::sign_message(b"mock");
+		let mut msg = PROOF_OF_OWNERSHIP_PREFIX.to_vec();
+		msg.extend_from_slice(&att.encode());
+		let (_, att_sig) = T::BenchmarkHelper::sign_message(&msg[..]);
 
 		// Must have allowance.
 		crate::AttestationAllowance::<T>::insert(&attester, 1);
 
-		#[extrinsic_call]
-		_(RawOrigin::Signed(attester.clone()), att.clone());
+		let sk = T::Crypto::new_secret([12; 32]);
+		let pk = T::Crypto::member_from_secret(&sk);
+		let proof_of_ownership = T::Crypto::sign(&sk, &msg[..]).unwrap();
 
-		assert!(crate::UnclaimedAttestations::<T>::contains_key(&attester, &att));
-		assert_eq!(crate::AttestationAllowance::<T>::get(&attester), 0);
-		assert!(!crate::AttestationAllowance::<T>::contains_key(&attester));
+		let _ = (proof_of_ownership, att_sig, pk);
+
+		#[block]
+		{}
+
 		Ok(())
-	}
 
-	#[benchmark]
-	fn cancel_attestation() -> Result<(), BenchmarkError> {
-		let attester: T::AccountId = whitelisted_caller();
-		let att: crate::AttestationOf<T> = account("att", 1, 0);
+		// TODO: implement
 
-		// Seed an existing unclaimed attestation.
-		crate::UnclaimedAttestations::<T>::insert(&attester, &att, ());
-		assert_eq!(crate::AttestationAllowance::<T>::get(&attester), 0);
+		// #[extrinsic_call]
+		// _(RawOrigin::Signed(attester.clone()), att.clone(), att_sig, pk, proof_of_ownership);
 
-		#[extrinsic_call]
-		_(RawOrigin::Signed(attester.clone()), att.clone());
-
-		assert!(!crate::UnclaimedAttestations::<T>::contains_key(&attester, &att));
-		assert_eq!(crate::AttestationAllowance::<T>::get(&attester), 1);
-		Ok(())
-	}
-
-	#[benchmark]
-	fn register() -> Result<(), BenchmarkError> {
-		let who: T::AccountId = whitelisted_caller();
-		let verifier: T::AccountId = account("verifier", 0, 0);
-		let att: crate::AttestationOf<T> = account("att", 2, 0);
-
-		// Seed the required unclaimed attestation.
-		crate::UnclaimedAttestations::<T>::insert(&verifier, &att, ());
-
-		// Minimal, generic values for keys/signatures via zero-Decode.
-		let ring_vrf_key: crate::MemberOf<T> =
-			Decode::decode(&mut TrailingZeroInput::zeroes()).expect("decode member");
-		let proof: crate::SignatureOf<T> =
-			Decode::decode(&mut TrailingZeroInput::zeroes()).expect("decode signature");
-		let att_sig: <T as crate::Config>::AttestationSignature =
-			Decode::decode(&mut TrailingZeroInput::zeroes()).expect("decode attestation sig");
-
-		#[extrinsic_call]
-		_(
-			crate::Origin::<T>::LitePersonRegistration(who.clone()),
-			ring_vrf_key,
-			[0u8; 32],
-			proof,
-			verifier.clone(),
-			att.clone(),
-			att_sig,
-		);
-
-		assert!(crate::LitePeople::<T>::contains_key(&who));
-		assert!(!crate::UnclaimedAttestations::<T>::contains_key(&verifier, &att));
-		Ok(())
+		// assert_eq!(crate::AttestationAllowance::<T>::get(&attester), 0);
+		// assert!(!crate::AttestationAllowance::<T>::contains_key(&attester));
+		// Ok(())
 	}
 
 	#[benchmark]

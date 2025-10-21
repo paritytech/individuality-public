@@ -61,11 +61,22 @@ impl pallet_balances::Config for Test {
 	type AccountStore = System;
 }
 
+#[cfg(feature = "runtime-benchmarks")]
+pub struct Helper;
+#[cfg(feature = "runtime-benchmarks")]
+impl crate::BenchmarkHelper<u64, UintAuthorityId> for Helper {
+	fn sign_message(_message: &[u8]) -> (u64, UintAuthorityId) {
+		(0, UintAuthorityId(0))
+	}
+}
+
 impl crate::Config for Test {
 	type WeightInfo = ();
 	type AttestationAllowanceManager = EnsureRoot<Self::AccountId>;
 	type Crypto = Simple;
 	type AttestationSignature = UintAuthorityId;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = Helper;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -149,23 +160,6 @@ pub fn exec_signed_tx(
 		PeopleLiteAuth::<Test>::new(None),
 	);
 
-	exec_tx(x)
-}
-
-#[allow(unused)]
-pub fn exec_as_lite_person_registration_tx(
-	account: u64,
-	call: RuntimeCall,
-	nonce: u32,
-) -> Result<(), TransactionExecutionError> {
-	let x = Extrinsic::new_signed(
-		call,
-		account,
-		UintAuthorityId(account),
-		PeopleLiteAuth::<Test>::new(Some(crate::PeopleLiteAuthData::AsLitePersonRegistration {
-			nonce,
-		})),
-	);
 	exec_tx(x)
 }
 

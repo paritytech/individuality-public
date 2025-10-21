@@ -25,35 +25,27 @@ use core::marker::PhantomData;
 // TODO: generate weights.
 
 pub trait WeightInfo {
-	fn as_lite_person_tx_ext() -> Weight;
-	fn increase_attestation_allowance() -> Weight;
-	fn clear_attestation_allowance() -> Weight;
-	fn set_attestation() -> Weight;
-	fn cancel_attestation() -> Weight;
-	fn register() -> Weight;
-	fn dispatch_as_signer() -> Weight;
+	fn register_lite_person() -> Weight;
+	fn register_person() -> Weight;
+	fn touch_person_authorization() -> Weight;
+	fn remove_expired_username_reservation() -> Weight;
+	fn update_identifier_key() -> Weight;
 }
 
 impl WeightInfo for () {
-	fn as_lite_person_tx_ext() -> Weight {
+	fn register_lite_person() -> Weight {
 		Weight::default()
 	}
-	fn set_attestation() -> Weight {
+	fn register_person() -> Weight {
 		Weight::default()
 	}
-	fn cancel_attestation() -> Weight {
+	fn touch_person_authorization() -> Weight {
 		Weight::default()
 	}
-	fn clear_attestation_allowance() -> Weight {
+	fn remove_expired_username_reservation() -> Weight {
 		Weight::default()
 	}
-	fn increase_attestation_allowance() -> Weight {
-		Weight::default()
-	}
-	fn register() -> Weight {
-		Weight::default()
-	}
-	fn dispatch_as_signer() -> Weight {
+	fn update_identifier_key() -> Weight {
 		Weight::default()
 	}
 }

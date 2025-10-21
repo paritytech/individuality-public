@@ -1,10 +1,10 @@
 [package]
-name = "pallet-people-lite"
+name = "pallet-resources"
 version = "4.0.0-dev"
 authors.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "A pallet holding information for people without strong individuality verification"
+description = "A pallet for common people resource management and allocation"
 
 [lints]
 workspace = true
@@ -23,12 +23,15 @@ sp-arithmetic = { workspace = true }
 sp-core = { workspace = true }
 sp-io = { workspace = true }
 sp-runtime = { workspace = true }
+sp-statement-store = { workspace = true }
 verifiable = { workspace = true }
 xcm = { workspace = true }
 individuality-support = { workspace = true }
 
 [dev-dependencies]
 pallet-balances = { workspace = true }
+pallet-people-lite = { workspace = true }
+pallet-people-multi = { workspace = true }
 
 [features]
 default = [ "std" ]
@@ -44,7 +47,10 @@ std = [
 	"sp-core/std",
 	"sp-io/std",
 	"sp-runtime/std",
+	"sp-statement-store/std",
 	"pallet-balances/std",
+	"pallet-people-lite/std",
+	"pallet-people-multi/std",
 	"verifiable/std",
 	"xcm/std"
 ]
@@ -55,6 +61,8 @@ runtime-benchmarks = [
 	"individuality-support/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 	"pallet-balances/runtime-benchmarks",
+	"pallet-people-lite/runtime-benchmarks",
+	"pallet-people-multi/runtime-benchmarks",
 	"xcm/runtime-benchmarks"
 ]
 try-runtime = [
@@ -62,4 +70,6 @@ try-runtime = [
 	"frame-system/try-runtime",
 	"sp-runtime/try-runtime",
 	"pallet-balances/try-runtime",
+	"pallet-people-multi/try-runtime",
+	"pallet-people-lite/try-runtime"
 ]
