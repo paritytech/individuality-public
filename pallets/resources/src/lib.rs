@@ -460,7 +460,7 @@ pub mod pallet {
 				statement,
 			);
 
-			Self::validate_statement_with_reason(source, statement).map_err(|e| {
+			Self::validate_statement_with_reason_and_account(source, statement, None).map_err(|e| {
 				use InvalidStatementReason::*;
 				match e {
 					NotConsumer => log::trace!(
@@ -480,25 +480,30 @@ pub mod pallet {
 			})
 		}
 
-		pub fn validate_statement_with_reason(
+		pub fn validate_statement_with_reason_and_account(
 			_source: StatementSource,
 			statement: Statement,
+			maybe_verified_account: Option<T::AccountId>,
 		) -> Result<ValidStatement, InvalidStatementReason> {
-			// Only accept signed statements.
-			match statement.proof() {
-				Some(Proof::Ed25519 { .. }) |
-				Some(Proof::Sr25519 { .. }) |
-				Some(Proof::Secp256k1Ecdsa { .. }) => (),
-				Some(Proof::OnChain { .. }) | None => {
-					return Err(InvalidStatementReason::StatementIsNotSigned);
-				},
-			}
+			let account = if let Some(account) = maybe_verified_account {
+				account
+			} else {
+				// Only accept signed statements.
+				match statement.proof() {
+					Some(Proof::Ed25519 { .. }) |
+					Some(Proof::Sr25519 { .. }) |
+					Some(Proof::Secp256k1Ecdsa { .. }) => (),
+					Some(Proof::OnChain { .. }) | None => {
+						return Err(InvalidStatementReason::StatementIsNotSigned);
+					},
+				}
 
-			let Valid(account) = statement.verify_signature() else {
-				return Err(InvalidStatementReason::InvalidSignature);
+				let Valid(account) = statement.verify_signature() else {
+					return Err(InvalidStatementReason::InvalidSignature);
+				};
+
+				account.into()
 			};
-
-			let account: T::AccountId = account.into();
 
 			// For now, we allow all consumers, lite people and full people, to use the same
 			// statement limit.
