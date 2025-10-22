@@ -100,36 +100,29 @@ mod benches {
 	}
 
 	#[benchmark]
-	fn set_attestation() -> Result<(), BenchmarkError> {
+	fn attest() -> Result<(), BenchmarkError> {
 		let attester: T::AccountId = whitelisted_caller();
 
 		let (att, _) = T::BenchmarkHelper::sign_message(b"mock");
-		let mut msg = PROOF_OF_OWNERSHIP_PREFIX.to_vec();
+		let sk = T::Crypto::new_secret([12; 32]);
+		let pk = T::Crypto::member_from_secret(&sk);
+
+		let mut msg = MSG_PREFIX.to_vec();
 		msg.extend_from_slice(&att.encode());
+		msg.extend_from_slice(&pk.encode());
+
 		let (_, att_sig) = T::BenchmarkHelper::sign_message(&msg[..]);
+		let proof_of_ownership = T::Crypto::sign(&sk, &msg[..]).unwrap();
 
 		// Must have allowance.
 		crate::AttestationAllowance::<T>::insert(&attester, 1);
 
-		let sk = T::Crypto::new_secret([12; 32]);
-		let pk = T::Crypto::member_from_secret(&sk);
-		let proof_of_ownership = T::Crypto::sign(&sk, &msg[..]).unwrap();
+		#[extrinsic_call]
+		_(RawOrigin::Signed(attester.clone()), att.clone(), att_sig, pk, proof_of_ownership);
 
-		let _ = (proof_of_ownership, att_sig, pk);
-
-		#[block]
-		{}
-
+		assert_eq!(crate::AttestationAllowance::<T>::get(&attester), 0);
+		assert!(!crate::AttestationAllowance::<T>::contains_key(&attester));
 		Ok(())
-
-		// TODO: implement
-
-		// #[extrinsic_call]
-		// _(RawOrigin::Signed(attester.clone()), att.clone(), att_sig, pk, proof_of_ownership);
-
-		// assert_eq!(crate::AttestationAllowance::<T>::get(&attester), 0);
-		// assert!(!crate::AttestationAllowance::<T>::contains_key(&attester));
-		// Ok(())
 	}
 
 	#[benchmark]

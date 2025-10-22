@@ -18,7 +18,7 @@
 use crate::{
 	mock::{exec_as_lite_person_tx, exec_signed_tx, new_test_ext, RuntimeCall, Test},
 	pallet::{AttestationAllowance, LitePeople},
-	Pallet, RecognitionMethod, PROOF_OF_OWNERSHIP_PREFIX,
+	MemberOf, Pallet, RecognitionMethod, MSG_PREFIX,
 };
 use codec::Encode;
 use frame_support::{assert_noop, assert_ok};
@@ -27,28 +27,21 @@ use verifiable::GenerateVerifiable;
 
 type SecretOfTest = <<Test as crate::Config>::Crypto as GenerateVerifiable>::Secret;
 
-fn poo_msg(who: u64) -> Vec<u8> {
-	who.using_encoded(|b| [&PROOF_OF_OWNERSHIP_PREFIX[..], b].concat())
+fn attest_msg(who: u64, key: MemberOf<Test>) -> Vec<u8> {
+	[&MSG_PREFIX[..], &who.encode()[..], &key.encode()[..]].concat()
 }
 
 fn secret_from_seed(seed: u8) -> SecretOfTest {
 	<Test as crate::Config>::Crypto::new_secret([seed; 32])
 }
 
-fn member_from_secret(sec: &SecretOfTest) -> crate::MemberOf<Test> {
+fn member_from_secret(sec: &SecretOfTest) -> MemberOf<Test> {
 	<Test as crate::Config>::Crypto::member_from_secret(sec)
 }
 
-fn sign_poo_with_secret(sec: &SecretOfTest, who: u64) -> crate::SignatureOf<Test> {
-	<Test as crate::Config>::Crypto::sign(sec, &poo_msg(who)[..]).expect("sign ok")
-}
-
-fn sign_poo_for(
-	who: u64,
-	member: crate::MemberOf<Test>,
-) -> <<Test as crate::Config>::Crypto as GenerateVerifiable>::Signature {
-	let msg = who.using_encoded(|bytes| [&PROOF_OF_OWNERSHIP_PREFIX[..], bytes].concat());
-	<Test as crate::Config>::Crypto::sign(&member, &msg[..]).unwrap()
+fn sign_attest_with_secret(sec: &SecretOfTest, who: u64) -> crate::SignatureOf<Test> {
+	let key = member_from_secret(sec);
+	<Test as crate::Config>::Crypto::sign(sec, &attest_msg(who, key)[..]).expect("sign ok")
 }
 
 #[test]
@@ -129,20 +122,19 @@ fn set_attestation_fails_for_wrong_origin() {
 		let user: u64 = 300;
 
 		let secret = secret_from_seed(11);
-		let ring_vrf_key: crate::MemberOf<Test> = member_from_secret(&secret);
-		let proof =
-			<Test as crate::Config>::Crypto::sign(&secret, &poo_msg(user)[..]).expect("sign ok");
+		let ring_vrf_key: MemberOf<Test> = member_from_secret(&secret);
+		let proof = sign_attest_with_secret(&secret, user);
 		let candidate_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(user);
 		// Root is not allowed for a signed-only call.
-		let err = Pallet::<Test>::set_attestation(
+		let err = Pallet::<Test>::attest(
 			frame_system::RawOrigin::Root.into(),
 			user,
 			candidate_signature,
 			ring_vrf_key,
 			proof,
 		)
-		.expect_err("root is not a valid origin for set_attestation");
+		.expect_err("root is not a valid origin for attest");
 
 		assert_eq!(err, DispatchError::BadOrigin.into());
 	});
@@ -155,13 +147,12 @@ fn set_attestation_fails_for_no_attestation_allowance() {
 		let user: u64 = 300;
 
 		let secret = secret_from_seed(11);
-		let ring_vrf_key: crate::MemberOf<Test> = member_from_secret(&secret);
-		let proof =
-			<Test as crate::Config>::Crypto::sign(&secret, &poo_msg(user)[..]).expect("sign ok");
+		let ring_vrf_key: MemberOf<Test> = member_from_secret(&secret);
+		let proof = sign_attest_with_secret(&secret, user);
 		let candidate_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(user);
 		// No allowance seeded -> must fail with NoAttestationAllowance.
-		let call = RuntimeCall::PeopleLite(crate::Call::<Test>::set_attestation {
+		let call = RuntimeCall::PeopleLite(crate::Call::<Test>::attest {
 			candidate: user,
 			candidate_signature,
 			ring_vrf_key,
@@ -187,13 +178,12 @@ fn set_attestation_succeeds() {
 		AttestationAllowance::<Test>::insert(who, 1);
 
 		let secret = secret_from_seed(11);
-		let ring_vrf_key: crate::MemberOf<Test> = member_from_secret(&secret);
-		let proof =
-			<Test as crate::Config>::Crypto::sign(&secret, &poo_msg(user)[..]).expect("sign ok");
+		let ring_vrf_key: MemberOf<Test> = member_from_secret(&secret);
+		let proof = sign_attest_with_secret(&secret, user);
 		let candidate_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(user);
 
-		let call = RuntimeCall::PeopleLite(crate::Call::<Test>::set_attestation {
+		let call = RuntimeCall::PeopleLite(crate::Call::<Test>::attest {
 			candidate: user,
 			candidate_signature,
 			ring_vrf_key,
@@ -219,14 +209,14 @@ fn register_fails_for_invalid_proof_of_ownership() {
 		// Valid ring key derived from `secret_ok`, but we sign with `secret_wrong`.
 		let secret_ok = secret_from_seed(1);
 		let secret_wrong = secret_from_seed(2);
-		let ring_ok: crate::MemberOf<Test> = member_from_secret(&secret_ok);
+		let ring_ok: MemberOf<Test> = member_from_secret(&secret_ok);
 
-		let bad_proof = sign_poo_with_secret(&secret_wrong, who);
+		let bad_proof = sign_attest_with_secret(&secret_wrong, who);
 		let candidate_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(who);
 
 		assert_noop!(
-			crate::Pallet::<Test>::set_attestation(
+			crate::Pallet::<Test>::attest(
 				Some(verifier).into(),
 				who,
 				candidate_signature,
@@ -247,15 +237,16 @@ fn register_fails_for_invalid_attestation_signature() {
 		// Seed allowance.
 		AttestationAllowance::<Test>::insert(verifier, 3);
 
-		let ring_vrf_key: crate::MemberOf<Test> = [99u8; 32];
-		let proof = sign_poo_for(who, ring_vrf_key);
+		let secret = secret_from_seed(11);
+		let ring_vrf_key: MemberOf<Test> = member_from_secret(&secret);
+		let proof = sign_attest_with_secret(&secret, who);
 
 		// Deliberately wrong attestation signature (doesn't match `attestation`).
 		let bad_attestation_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(who + 1);
 
 		assert_noop!(
-			crate::Pallet::<Test>::set_attestation(
+			crate::Pallet::<Test>::attest(
 				Some(verifier).into(),
 				who,
 				bad_attestation_signature,
@@ -278,13 +269,13 @@ fn register_fails_for_already_registered() {
 
 		// First register using a valid (member, secret, signature) tuple.
 		let secret = secret_from_seed(7);
-		let ring_vrf_key: crate::MemberOf<Test> = member_from_secret(&secret);
-		let proof = sign_poo_with_secret(&secret, who);
+		let ring_vrf_key: MemberOf<Test> = member_from_secret(&secret);
+		let proof = sign_attest_with_secret(&secret, who);
 		let candidate_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(who);
 
 		// Pre-register the account by calling the pallet directly with the proper origin.
-		let set_call = RuntimeCall::PeopleLite(crate::Call::<Test>::set_attestation {
+		let set_call = RuntimeCall::PeopleLite(crate::Call::<Test>::attest {
 			ring_vrf_key,
 			proof_of_ownership: proof,
 			candidate: who,
@@ -295,12 +286,12 @@ fn register_fails_for_already_registered() {
 
 		// Try to register again via the tx extension -> must fail "AlreadyRegistered".
 		let secret = secret_from_seed(8);
-		let ring_vrf_key: crate::MemberOf<Test> = member_from_secret(&secret);
-		let proof = sign_poo_with_secret(&secret, who);
+		let ring_vrf_key: MemberOf<Test> = member_from_secret(&secret);
+		let proof = sign_attest_with_secret(&secret, who);
 		let candidate_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(who);
 		assert_noop!(
-			crate::Pallet::<Test>::set_attestation(
+			crate::Pallet::<Test>::attest(
 				Some(verifier).into(),
 				who,
 				candidate_signature,
@@ -389,13 +380,12 @@ fn full_flow_manager_attester_user_register_and_dispatch() {
 
 		// 2) Verifier registers the user.
 		let secret = secret_from_seed(11);
-		let ring_vrf_key: crate::MemberOf<Test> = member_from_secret(&secret);
-		let proof =
-			<Test as crate::Config>::Crypto::sign(&secret, &poo_msg(user)[..]).expect("sign ok");
+		let ring_vrf_key: MemberOf<Test> = member_from_secret(&secret);
+		let proof = sign_attest_with_secret(&secret, user);
 		let candidate_signature: <Test as crate::Config>::AttestationSignature =
 			sp_runtime::testing::UintAuthorityId(user);
 
-		let set_call = RuntimeCall::PeopleLite(crate::Call::<Test>::set_attestation {
+		let set_call = RuntimeCall::PeopleLite(crate::Call::<Test>::attest {
 			ring_vrf_key,
 			proof_of_ownership: proof,
 			candidate: user,

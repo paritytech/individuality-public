@@ -28,7 +28,7 @@ pub trait WeightInfo {
 	fn as_lite_person_tx_ext() -> Weight;
 	fn increase_attestation_allowance() -> Weight;
 	fn clear_attestation_allowance() -> Weight;
-	fn set_attestation() -> Weight;
+	fn attest() -> Weight;
 	fn cancel_attestation() -> Weight;
 	fn register() -> Weight;
 	fn dispatch_as_signer() -> Weight;
@@ -38,7 +38,7 @@ impl WeightInfo for () {
 	fn as_lite_person_tx_ext() -> Weight {
 		Weight::default()
 	}
-	fn set_attestation() -> Weight {
+	fn attest() -> Weight {
 		Weight::default()
 	}
 	fn cancel_attestation() -> Weight {

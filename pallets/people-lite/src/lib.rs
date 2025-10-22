@@ -54,7 +54,7 @@ pub mod pallet {
 	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
 
-	pub const PROOF_OF_OWNERSHIP_PREFIX: &[u8; 30] = b"pop:people-lite:register using";
+	pub const MSG_PREFIX: &[u8; 30] = b"pop:people-lite:register using";
 
 	// const LOG_TARGET: &str = "runtime::pallet-people-lite";
 
@@ -220,18 +220,20 @@ pub mod pallet {
 		///   key.
 		///
 		/// The message to be signed by both keys from which the signatures are generated is created
-		/// by concatenating the `PROOF_OF_OWNERSHIP_PREFIX` prefix with the encoded bytes of the
-		/// user's account.
+		/// by concatenating the bytes "pop:people-lite:register using" with the encoded bytes of
+		/// the user's account (`candidate`), and the encoded bytes of the ring VRF key
+		/// (`ring_vrf_key`).
 		///
 		/// - `candidate`: The candidate to be recognized as a lite person.
 		/// - `candidate_signature`: The signature, provided by the candidate, to allow the attester
 		///   to complete the registration process on their behalf.
 		/// - `ring_vrf_key`: The ring VRF key to be associated with the lite person.
-		/// - `proof_of_ownership`: The ring VRF signature to prove that the candidate owns the ring
-		///   VRF key.
+		/// - `ring_vrf_key_signature`: The ring VRF signature, provided by the candidate, to allow
+		///   the attester to complete the registration process. This also prove the ownership of
+		///   the ring VRF key by the candidate.
 		#[pallet::call_index(2)]
-		#[pallet::weight(<T as Config>::WeightInfo::set_attestation())]
-		pub fn set_attestation(
+		#[pallet::weight(<T as Config>::WeightInfo::attest())]
+		pub fn attest(
 			origin: OriginFor<T>,
 			candidate: T::AccountId,
 			candidate_signature: T::AttestationSignature,
@@ -251,8 +253,9 @@ pub mod pallet {
 			}
 
 			// Verify the candidate's signature for the attestation.
-			let msg =
-				candidate.using_encoded(|bytes| [&PROOF_OF_OWNERSHIP_PREFIX[..], bytes].concat());
+			let msg = candidate.using_encoded(|c_bytes| {
+				ring_vrf_key.using_encoded(|rv_bytes| [&MSG_PREFIX[..], c_bytes, rv_bytes].concat())
+			});
 			ensure!(
 				candidate_signature.verify(&msg[..], &candidate),
 				Error::<T>::InvalidAttestationSignature,
@@ -320,16 +323,14 @@ pub mod pallet {
 	#[cfg(feature = "runtime-benchmarks")]
 	impl BenchmarkHelper<sp_runtime::AccountId32, sp_runtime::MultiSignature> for () {
 		fn sign_message(message: &[u8]) -> (sp_runtime::AccountId32, sp_runtime::MultiSignature) {
-			let public = sp_io::crypto::sr25519_generate(0.into(), None);
-			let signature = sp_runtime::MultiSignature::Sr25519(
-				sp_io::crypto::sr25519_sign(
-					0.into(),
-					&public.into_account().try_into().unwrap(),
-					message,
-				)
-				.unwrap(),
-			);
-			(public.into(), signature)
+			use sp_core::Pair;
+			use sp_runtime::traits::IdentifyAccount;
+			let entropy = [1u8; 32];
+			let pair = sp_core::ed25519::Pair::from_seed(&entropy);
+			let account = pair.public().into_account().into();
+			let secret = ed25519_zebra::SigningKey::from(entropy);
+			let signature = sp_core::ed25519::Signature::from_raw(secret.sign(message).into());
+			(account, signature.into())
 		}
 	}
 }
