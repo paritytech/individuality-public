@@ -27,8 +27,7 @@ use scale_info::TypeInfo;
 pub type SignatureOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Signature;
 pub type ConsumerInfoOf<T> = ConsumerInfo<Username<T>, Credibility>;
 pub type UsernameReservationOf<T> = UsernameReservation<<T as frame_system::Config>::AccountId>;
-pub type PersonalUsernameChoiceOf<T> =
-	PersonalUsernameChoice<Username<T>, <T as Config>::OffchainSignature>;
+pub type PersonalUsernameChoiceOf<T> = PersonalUsernameChoice<Username<T>>;
 
 /// A byte vec used to represent a username.
 pub type Username<T> = BoundedVec<u8, <T as Config>::MaxUsernameLength>;
@@ -40,8 +39,10 @@ pub type Username<T> = BoundedVec<u8, <T as Config>::MaxUsernameLength>;
 pub struct ConsumerInfo<Username, Credibility> {
 	/// An opaque key type which will be used in E2E encrypted communication between consumers.
 	pub identifier_key: CommunicationIdentifier,
-	/// The username associated with this consumer.
-	pub username: Username,
+	/// The username associated with the consumer if they are a full person.
+	pub full_username: Option<Username>,
+	/// The username associated with this consumer's lite person identity.
+	pub lite_username: Username,
 	/// The credibility of a consumer.
 	pub credibility: Credibility,
 }
@@ -72,11 +73,11 @@ pub struct UsernameReservation<Account> {
 #[derive(
 	Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen,
 )]
-pub enum PersonalUsernameChoice<Username, Signature> {
+pub enum PersonalUsernameChoice<Username> {
 	/// Use a new username.
 	Standalone(Username),
-	/// Take a reserved username with the signature of the reservation's submitter.
-	Reservation(Username, Signature),
+	/// Use the reserved username of the submitter.
+	Reservation(Username),
 }
 
 /// The reason why a statement is invalid for pallet-resources.

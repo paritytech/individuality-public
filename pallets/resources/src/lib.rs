@@ -131,7 +131,11 @@ pub mod pallet {
 		StorageMap<_, Blake2_128Concat, T::AccountId, ConsumerInfoOf<T>>;
 
 	/// Reverse lookup from `username` to the `AccountId` that has registered it. The `owner` value
-	/// should be a key in the `Consumers` map.
+	/// should be a key in the `Consumers` map. There can be at most 2 usernames pointing to the
+	/// same `owner`:
+	/// - username associated with a consumer's lite person identity - this will always be present;
+	/// - optionally another username associated with the consumer's full person identity, if
+	///   applicable.
 	#[pallet::storage]
 	pub type UsernameOwnerOf<T: Config> =
 		StorageMap<_, Blake2_128Concat, Username<T>, T::AccountId, OptionQuery>;
@@ -180,6 +184,10 @@ pub mod pallet {
 		UsernameReservationTaken,
 		/// The reservation has not expired.
 		ReservationFresh,
+		/// There is no lite consumer to be linked.
+		NoLinkedIdentity,
+		/// The lite consumer is already linked to a full person consumer.
+		AlreadyLinked,
 	}
 
 	#[pallet::hooks]
@@ -198,6 +206,11 @@ pub mod pallet {
 		) -> DispatchResultWithPostInfo {
 			// Ensure this is a lite person.
 			let lite_person_account = T::EnsureLitePerson::ensure_origin(origin)?;
+			// Must not already be registered.
+			ensure!(
+				!Consumers::<T>::contains_key(&lite_person_account),
+				Error::<T>::AlreadyRegistered
+			);
 			// Validate the username, including that it is not already taken.
 			ensure!(!UsernameOwnerOf::<T>::contains_key(&username), Error::<T>::UsernameTaken);
 			ensure!(!ReservedUsernames::<T>::contains_key(&username), Error::<T>::UsernameTaken);
@@ -224,7 +237,12 @@ pub mod pallet {
 			// Set the consumer's record.
 			Consumers::<T>::insert(
 				&lite_person_account,
-				ConsumerInfo { identifier_key, username, credibility: Credibility::Lite },
+				ConsumerInfo {
+					identifier_key,
+					full_username: None,
+					lite_username: username,
+					credibility: Credibility::Lite,
+				},
 			);
 			frame_system::Pallet::<T>::inc_sufficients(&lite_person_account);
 
@@ -234,20 +252,19 @@ pub mod pallet {
 
 		/// Register a proven person as a consumer.
 		///
-		/// The consumer can choose if they want to have a new username or use an existing
-		/// reservation, provided they have a signature from the original reservation's submitter to
-		/// give them the right to use it. In practice, the submitter and the person would almost
-		/// always be the same person.
+		///	The person must link a previously recognized lite identity, which will be upgraded to a
+		/// full person consumer. In order to prove they hold the lite identity they want to link,
+		/// users must provide a `lite_identity_proof` signature, created by signing the alias bytes
+		/// using their lite consumer account.
 		///
-		/// The payload to be signed by the original lite person who made the reservation is
-		/// constructed by encoding the tuple of the beneficiary's alias and the reserved username
+		/// The consumer can choose if they want to have a new username or use an existing
+		/// reservation made in the name of the lite consumer who will be linked.
 		#[pallet::call_index(1)]
 		#[pallet::weight(<T as Config>::WeightInfo::register_person())]
 		pub fn register_person(
 			origin: OriginFor<T>,
-			account: T::AccountId,
-			identifier_key: CommunicationIdentifier,
-			proof_of_ownership: T::OffchainSignature,
+			linked_lite_identity: T::AccountId,
+			lite_identity_proof: T::OffchainSignature,
 			username_choice: PersonalUsernameChoiceOf<T>,
 		) -> DispatchResultWithPostInfo {
 			// Ensure this is a person.
@@ -268,17 +285,13 @@ pub mod pallet {
 					Self::validate_username(&username, true)?;
 					username
 				},
-				PersonalUsernameChoice::Reservation(reserved, signature) => {
+				PersonalUsernameChoice::Reservation(reserved) => {
 					let reservation =
 						ReservedUsernames::<T>::take(&reserved).ok_or(Error::<T>::NoReservation)?;
-					// Check that the lite person who reserved this username has signed off on this
-					// person's usage of the reservation through a signature. The payload to be
-					// signed by the original lite person who made the reservation is constructed by
-					// encoding the tuple of the beneficiary's alias and the reserved username, as
-					// below.
-					let msg = (&alias, &reserved).encode();
+					// Check that the lite person which will be linked with this full person was the
+					// one who reserved this username.
 					ensure!(
-						signature.verify(&msg[..], &reservation.owner),
+						reservation.owner == linked_lite_identity,
 						Error::<T>::InvalidUsernameSignature
 					);
 					// As the username is already reserved, there cannot be another person holding
@@ -287,29 +300,32 @@ pub mod pallet {
 				},
 			};
 
-			// Verify proof of ownership of the account key.
+			// Verify proof of ownership of the linked lite person.
 			ensure!(
-				proof_of_ownership.verify(&alias[..], &account),
+				lite_identity_proof.verify(&alias[..], &linked_lite_identity),
 				Error::<T>::InvalidProofOfOwnership,
 			);
+			// Ensure the linked lite person was not already linked to another full person.
+			let mut linked_consumer_info =
+				Consumers::<T>::get(&linked_lite_identity).ok_or(Error::<T>::NoLinkedIdentity)?;
+			ensure!(linked_consumer_info.full_username.is_none(), Error::<T>::AlreadyLinked);
+			// Update the linked lite consumer's record with the full person username.
+			linked_consumer_info.full_username = Some(username.clone());
+			// Update the linked lite consumer's record with the full person credibility. From this
+			// moment onward, this consumer will be registered as a full person through this
+			// upgrade.
+			let now = T::Clock::now().as_secs();
+			linked_consumer_info.credibility = Credibility::Person { alias, last_update: now };
 
 			// Add the username to the list.
-			UsernameOwnerOf::<T>::insert(&username, &account);
+			UsernameOwnerOf::<T>::insert(&username, &linked_lite_identity);
 			// Mark the alias as used.
-			AccountOfAlias::<T>::insert(alias, &account);
-			let now = T::Clock::now().as_secs();
-			// Set the consumer's record.
-			Consumers::<T>::insert(
-				&account,
-				ConsumerInfo {
-					identifier_key,
-					username,
-					credibility: Credibility::Person { alias, last_update: now },
-				},
-			);
-			frame_system::Pallet::<T>::inc_sufficients(&account);
+			AccountOfAlias::<T>::insert(alias, &linked_lite_identity);
 
-			Self::deposit_event(Event::PersonRegistered { alias, account });
+			// Set the consumer's record.
+			Consumers::<T>::insert(&linked_lite_identity, linked_consumer_info);
+
+			Self::deposit_event(Event::PersonRegistered { alias, account: linked_lite_identity });
 			Ok(Pays::No.into())
 		}
 
@@ -396,34 +412,35 @@ pub mod pallet {
 					Error::<T>::InvalidUsername
 				);
 				ensure!(
-					username.iter().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()),
+					username.iter().all(|byte| byte.is_ascii_lowercase()),
 					Error::<T>::InvalidUsername
 				);
 			} else {
 				// Usernames for lite people must follow a pattern of at least `MinUsernameLength`
 				// lowercase letters, followed by at least `MIN_LITE_USERNAME_DIGITS` digits.
-				let first_digit_index = username
+				let separator_index = username
 					.iter()
-					.find(|byte| byte.is_ascii_digit())
+					.position(|byte| *byte == b'.')
 					.ok_or(Error::<T>::InvalidUsername)?;
+				// Letter part must be at least `MinUsernameLength` characters long.
 				ensure!(
-					*first_digit_index as u32 >= T::MinUsernameLength::get(),
+					separator_index as u32 >= T::MinUsernameLength::get(),
 					Error::<T>::InvalidUsername
 				);
+				// Digits part must be at least `MIN_LITE_USERNAME_DIGITS` digits long.
 				ensure!(
-					username.len() - *first_digit_index as usize >= MIN_LITE_USERNAME_DIGITS,
+					username.len() - separator_index > MIN_LITE_USERNAME_DIGITS,
 					Error::<T>::InvalidUsername
 				);
+				// First segment must be all ASCII lowercase letters.
 				ensure!(
-					username[..(*first_digit_index as usize)]
-						.iter()
-						.all(|byte| byte.is_ascii_lowercase()),
+					username[..(separator_index)].iter().all(|byte| byte.is_ascii_lowercase()),
 					Error::<T>::InvalidUsername
 				);
+				// Second segment must be all ASCII digits.
+				// Slice access is safe because the length of the digit part was checked above.
 				ensure!(
-					username[(*first_digit_index as usize)..]
-						.iter()
-						.all(|byte| byte.is_ascii_digit()),
+					username[(1 + separator_index)..].iter().all(|byte| byte.is_ascii_digit()),
 					Error::<T>::InvalidUsername
 				);
 			}

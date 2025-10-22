@@ -14,3 +14,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use crate::mock::Resources;
+
+#[test]
+fn test_username_basic() {
+	Resources::validate_username(&b"abcdefg.12".to_vec().try_into().unwrap(), false).unwrap();
+	Resources::validate_username(&b"abcdefg.1".to_vec().try_into().unwrap(), false).unwrap_err();
+	Resources::validate_username(&b"abcdef.12".to_vec().try_into().unwrap(), false).unwrap_err();
+	Resources::validate_username(&b"abcdef1.12".to_vec().try_into().unwrap(), false).unwrap_err();
+	Resources::validate_username(&b"abcdefg.a2".to_vec().try_into().unwrap(), false).unwrap_err();
+	Resources::validate_username(&b"abcdefgh12".to_vec().try_into().unwrap(), false).unwrap_err();
+	Resources::validate_username(&b"abcdefghij".to_vec().try_into().unwrap(), false).unwrap_err();
+}
