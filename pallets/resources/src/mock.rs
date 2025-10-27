@@ -30,10 +30,12 @@ use frame_system::{
 	offchain::{CreateBare, CreateTransactionBase},
 	EnsureRoot,
 };
+use individuality_support::traits::{ContextualAlias, RingIndex};
+use pallet_people_multi::RevisedContextualAlias;
 use scale_info::TypeInfo;
 use sp_runtime::{
 	testing::H256,
-	traits::{Applyable, BlakeTwo256, Checkable, ConstU32, ConstUint, IdentityLookup},
+	traits::{Applyable, BlakeTwo256, Checkable, ConstU32, ConstU64, ConstUint, IdentityLookup},
 	transaction_validity::{InvalidTransaction, TransactionSource, TransactionValidityError},
 	AccountId32, BuildStorage, DispatchError, TransactionOutcome,
 };
@@ -73,6 +75,56 @@ pub fn id_to_alias(id: u64) -> Alias {
 	let mut bytes = [0; 32];
 	bytes[..8].copy_from_slice(&id.to_le_bytes());
 	bytes
+}
+
+/// Helper function to create a bounded vec username
+pub fn username<T: Config>(s: &[u8]) -> Username<T> {
+	s.to_vec().try_into().unwrap()
+}
+
+/// Helper to create a communication identifier
+pub fn comm_id(s: &[u8]) -> CommunicationIdentifier {
+	let mut buf = Vec::new();
+	while buf.len() < 65 {
+		buf.extend_from_slice(s);
+	}
+	if buf.len() > 65 {
+		buf.truncate(65);
+	}
+	buf.try_into().unwrap()
+}
+
+/// Helper to create a valid signature for a lite identity proof
+pub fn mock_lite_proof(lite_account: AccountId32) -> AccountAuthority {
+	AccountAuthority(lite_account)
+}
+
+/// Helper to mock the LitePerson origin
+pub fn lite_person_origin(account: u64) -> RuntimeOrigin {
+	RuntimeOrigin::from(OriginCaller::PeopleLite(pallet_people_lite::Origin::LitePerson(
+		id_to_account(account),
+	)))
+}
+
+/// Helper to mock the Person origin
+pub fn person_origin_for(alias_id: u64, ring: RingIndex, revision: u32) -> RuntimeOrigin {
+	let alias = id_to_alias(alias_id);
+	let contextual_alias = ContextualAlias { context: RESOURCES_CONTEXT, alias };
+	let revised_alias = RevisedContextualAlias { ca: contextual_alias, ring, revision };
+	RuntimeOrigin::from(OriginCaller::People(pallet_people_multi::Origin::PersonalAlias(
+		revised_alias,
+	)))
+}
+
+/// Helper to advance time (seconds)
+pub fn advance_time_sec(secs: u64) {
+	let current_time = TestClock::now().as_secs();
+	mock::Now::set(core::time::Duration::from_secs(current_time.saturating_add(secs)));
+}
+
+/// Helper to set current time (seconds)
+pub fn set_time_sec(secs: u64) {
+	mock::Now::set(core::time::Duration::from_secs(secs));
 }
 
 /// A signature type that is always successful for a given account
@@ -117,7 +169,6 @@ frame_support::construct_runtime!(
 	{
 		System: frame_system,
 		Resources: crate,
-		Balances: pallet_balances,
 		People: pallet_people_multi,
 		PeopleLite: pallet_people_lite,
 	}
@@ -141,17 +192,12 @@ impl frame_system::Config for Test {
 	type BlockHashCount = ConstUint<250>;
 	type Version = ();
 	type PalletInfo = PalletInfo;
-	type AccountData = pallet_balances::AccountData<u64>;
+	type AccountData = ();
 	type OnNewAccount = ();
 	type OnKilledAccount = ();
 	type SystemWeightInfo = ();
 	type SS58Prefix = ConstUint<42>;
 	type OnSetCode = ();
-}
-
-#[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
-impl pallet_balances::Config for Test {
-	type AccountStore = System;
 }
 
 parameter_types! {
@@ -213,33 +259,6 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for MockLitePerson {
 	}
 }
 
-parameter_types! {
-	pub const MaxUsernameLength: u32 = 32;
-	pub const MinUsernameLength: u32 = 7;
-	pub const PersonAuthDuration: u32 = 30 * 24 * 60 * 60; // 40 days
-	pub const MinPersonAuthUpdateInterval: u32 = 5 * 24 * 60 * 60; // 5 days
-	pub const UsernameReservationDuration: u64 = 20 * 60; // 20 minutes
-	pub LitePersonStatementLimit: ValidStatement = ValidStatement {
-		max_size: 4 * 1024, // 4 KiB
-		max_count: 10,
-	};
-}
-
-impl crate::Config for Test {
-	type WeightInfo = ();
-	type Crypto = Simple;
-	type MaxUsernameLength = MaxUsernameLength;
-	type MinUsernameLength = MinUsernameLength;
-	type PersonAuthDuration = PersonAuthDuration;
-	type MinPersonAuthUpdateInterval = MinPersonAuthUpdateInterval;
-	type EnsurePerson = MockPerson;
-	type EnsureLitePerson = MockLitePerson;
-	type Clock = TestClock;
-	type OffchainSignature = AccountAuthority;
-	type UsernameReservationDuration = UsernameReservationDuration;
-	type LitePersonStatementLimit = LitePersonStatementLimit;
-}
-
 #[cfg(feature = "runtime-benchmarks")]
 pub struct Helper;
 #[cfg(feature = "runtime-benchmarks")]
@@ -269,8 +288,30 @@ impl pallet_people_multi::Config for Test {
 	type BenchmarkHelper = ();
 }
 
+parameter_types! {
+	pub LitePersonStatementLimit: ValidStatement = ValidStatement {
+		max_size: 4 * 1024, // 4 KiB
+		max_count: 10,
+	};
+}
+
+impl Config for Test {
+	type WeightInfo = ();
+	type Crypto = Simple;
+	type MaxUsernameLength = ConstU32<32>;
+	type MinUsernameLength = ConstU32<7>;
+	type PersonAuthDuration = ConstU32<20>;
+	type MinPersonAuthUpdateInterval = ConstU32<10>;
+	type EnsurePerson = pallet_people_multi::EnsurePersonalAliasInContext<Test>;
+	type EnsureLitePerson = pallet_people_lite::EnsureLitePerson<Test>;
+	type Clock = TestClock;
+	type OffchainSignature = AccountAuthority;
+	type UsernameReservationDuration = ConstU64<40>;
+	type LitePersonStatementLimit = LitePersonStatementLimit;
+}
+
 pub fn new_test_ext() -> sp_io::TestExternalities {
-	let c = RuntimeGenesisConfig::default().build_storage().unwrap();
+	let c = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 	sp_io::TestExternalities::from(c)
 }
 

@@ -37,7 +37,47 @@ mod benches {
 	use super::*;
 
 	#[benchmark]
-	fn todo() -> Result<(), BenchmarkError> {
+	fn register_lite_person() -> Result<(), BenchmarkError> {
+		// TODO TODO
+
+		#[block]
+		{}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn register_person() -> Result<(), BenchmarkError> {
+		// TODO TODO
+
+		#[block]
+		{}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn touch_person_authorization() -> Result<(), BenchmarkError> {
+		// TODO TODO
+
+		#[block]
+		{}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn remove_expired_username_reservation() -> Result<(), BenchmarkError> {
+		// TODO TODO
+
+		#[block]
+		{}
+
+		Ok(())
+	}
+
+	#[benchmark]
+	fn update_identifier_key() -> Result<(), BenchmarkError> {
 		// TODO TODO
 
 		#[block]
