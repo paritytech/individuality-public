@@ -15,11 +15,10 @@
 
 //! Traits concerned with modelling reality.
 
-
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use frame_support::Parameter;
 use scale_info::TypeInfo;
-use sp_runtime::{DispatchError, DispatchResult, RuntimeDebug};
+use sp_runtime::{traits::ConstU32, BoundedVec, DispatchError, DispatchResult, RuntimeDebug};
 
 /// Identity of personhood.
 ///
@@ -174,4 +173,43 @@ pub trait CountedMembers {
 	/// Sets the number of active members in the set.
 	#[cfg(feature = "runtime-benchmarks")]
 	fn set_active_count(count: u32);
+}
+
+/// Username type used in individuality systems.
+///
+/// WARNING
+///
+/// Changing the maximum length of this type will require a migration in all pallets using it!
+pub type Username = BoundedVec<u8, ConstU32<32>>;
+
+/// Service for registering consumers.
+pub trait ConsumerRegistrar<AccountId> {
+	type Error;
+
+	/// Register a lite consumer using the provided information.
+	///
+	/// IMPORTANT
+	///
+	/// This function does not check for authorization. The caller is responsible for ensuring
+	/// the `account` to be registered is a lite person and that the user's consent was
+	/// provided, usually through a signature verified by the caller.
+	fn register_lite_consumer(
+		account: AccountId,
+		identifier_key: CommunicationIdentifier,
+		username: Username,
+		reserved_username: Option<Username>,
+	) -> Result<(), Self::Error>;
+}
+
+impl<Account> ConsumerRegistrar<Account> for () {
+	type Error = &'static str;
+
+	fn register_lite_consumer(
+		_account: Account,
+		_identifier_key: CommunicationIdentifier,
+		_username: Username,
+		_reserved_username: Option<Username>,
+	) -> Result<(), Self::Error> {
+		Ok(())
+	}
 }

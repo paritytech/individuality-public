@@ -19,22 +19,16 @@ use super::*;
 
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
-use frame_support::BoundedVec;
 use scale_info::TypeInfo;
 
 pub type SignatureOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Signature;
-pub type ConsumerInfoOf<T> = ConsumerInfo<Username<T>, Credibility>;
 pub type UsernameReservationOf<T> = UsernameReservation<<T as frame_system::Config>::AccountId>;
-pub type PersonalUsernameChoiceOf<T> = PersonalUsernameChoice<Username<T>>;
-
-/// A byte vec used to represent a username.
-pub type Username<T> = BoundedVec<u8, <T as Config>::MaxUsernameLength>;
 
 /// The information related to a particular consumer.
 #[derive(
 	Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen,
 )]
-pub struct ConsumerInfo<Username, Credibility> {
+pub struct ConsumerInfo {
 	/// An opaque key type which will be used in E2E encrypted communication between consumers.
 	pub identifier_key: CommunicationIdentifier,
 	/// The username associated with the consumer if they are a full person.
@@ -46,7 +40,9 @@ pub struct ConsumerInfo<Username, Credibility> {
 }
 
 /// The credibility of a consumer.
-#[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo, PartialEq, Debug)]
+#[derive(
+	Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen,
+)]
 pub enum Credibility {
 	/// Recognized as a lite person.
 	Lite,
@@ -71,7 +67,7 @@ pub struct UsernameReservation<Account> {
 #[derive(
 	Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen,
 )]
-pub enum PersonalUsernameChoice<Username> {
+pub enum PersonalUsernameChoice {
 	/// Use a new username.
 	Standalone(Username),
 	/// Use the reserved username of the submitter.

@@ -17,6 +17,7 @@
 
 use crate::*;
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
+use core::cell::RefCell;
 use frame_support::{
 	derive_impl,
 	dispatch::{DispatchErrorWithPostInfo, GetDispatchInfo},
@@ -28,8 +29,8 @@ use frame_system::{
 	offchain::{CreateBare, CreateTransactionBase},
 	EnsureRoot,
 };
-use indiv_support::traits::{ContextualAlias, RingIndex};
 use indiv_pallet_people::RevisedContextualAlias;
+use indiv_support::traits::{ContextualAlias, RingIndex};
 use scale_info::TypeInfo;
 use sp_runtime::{
 	testing::H256,
@@ -76,7 +77,7 @@ pub fn id_to_alias(id: u64) -> Alias {
 }
 
 /// Helper function to create a bounded vec username
-pub fn username<T: Config>(s: &[u8]) -> Username<T> {
+pub fn username<T: Config>(s: &[u8]) -> Username {
 	s.to_vec().try_into().unwrap()
 }
 
@@ -117,12 +118,12 @@ pub fn person_origin_for(alias_id: u64, ring: RingIndex, revision: u32) -> Runti
 /// Helper to advance time (seconds)
 pub fn advance_time_sec(secs: u64) {
 	let current_time = TestClock::now().as_secs();
-	mock::Now::set(core::time::Duration::from_secs(current_time.saturating_add(secs)));
+	TestClock::set_time(Duration::from_secs(current_time + secs));
 }
 
 /// Helper to set current time (seconds)
 pub fn set_time_sec(secs: u64) {
-	mock::Now::set(core::time::Duration::from_secs(secs));
+	TestClock::set_time(Duration::from_secs(secs));
 }
 
 /// A signature type that is always successful for a given account
@@ -198,14 +199,21 @@ impl frame_system::Config for Test {
 	type OnSetCode = ();
 }
 
-parameter_types! {
-	pub static Now: core::time::Duration = core::time::Duration::from_millis(0);
+thread_local! {
+	pub static MOCK_UNIX_TIME: RefCell<Duration> = RefCell::new(Default::default());
 }
 
 pub struct TestClock;
+
 impl UnixTime for TestClock {
-	fn now() -> core::time::Duration {
-		Now::get()
+	fn now() -> Duration {
+		MOCK_UNIX_TIME.with(|mock| *mock.borrow())
+	}
+}
+
+impl TestClock {
+	fn set_time(now: Duration) {
+		MOCK_UNIX_TIME.with(|mock| *mock.borrow_mut() = now);
 	}
 }
 
@@ -271,6 +279,7 @@ impl pallet_people_lite::Config for Test {
 	type AttestationAllowanceManager = EnsureRoot<Self::AccountId>;
 	type Crypto = Simple;
 	type AttestationSignature = AccountAuthority;
+	type LiteConsumerRegistrar = Resources;
 	#[cfg(feature = "runtime-benchmarks")]
 	type BenchmarkHelper = Helper;
 }
@@ -293,6 +302,22 @@ parameter_types! {
 	};
 }
 
+#[cfg(feature = "runtime-benchmarks")]
+pub struct BenchmarkHelper;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl benchmarking::BenchmarkHelper<Test> for BenchmarkHelper {
+	fn set_time(now: Duration) {
+		MOCK_UNIX_TIME.with(|mock| *mock.borrow_mut() = now);
+	}
+
+	fn sign_message(message: &[u8]) -> (AccountId32, AccountAuthority) {
+		let account = AccountId32::new([42u8; 32]);
+		let signature = AccountAuthority(account.clone());
+		(account, signature)
+	}
+}
+
 impl Config for Test {
 	type WeightInfo = ();
 	type Crypto = Simple;
@@ -306,6 +331,8 @@ impl Config for Test {
 	type OffchainSignature = AccountAuthority;
 	type UsernameReservationDuration = ConstU64<40>;
 	type LitePersonStatementLimit = LitePersonStatementLimit;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = BenchmarkHelper;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

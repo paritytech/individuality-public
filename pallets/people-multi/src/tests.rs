@@ -82,12 +82,13 @@ fn position_sanity_check() {
 					pending_suspensions.contains(&(i as u32)),
 					"key migrated but suspension not pending"
 				);
-				continue
+				continue;
 			};
 			let record = People::<Test>::get(personal_id).expect("should have record");
 			match record.position {
-				RingPosition::Onboarding { .. } =>
-					unreachable!("cannot be onboarding and in this ring's keys"),
+				RingPosition::Onboarding { .. } => {
+					unreachable!("cannot be onboarding and in this ring's keys")
+				},
 				RingPosition::Included { ring_index: actual_index, ring_position, .. } => {
 					assert!(ring_index == actual_index, "invalid ring index position");
 					assert!(keys[ring_position as usize] == *key, "invalid ring position");

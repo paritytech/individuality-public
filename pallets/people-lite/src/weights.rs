@@ -27,6 +27,7 @@ pub trait WeightInfo {
 	fn increase_attestation_allowance() -> Weight;
 	fn clear_attestation_allowance() -> Weight;
 	fn attest() -> Weight;
+	fn register_lite_consumer() -> Weight;
 	fn cancel_attestation() -> Weight;
 	fn register() -> Weight;
 	fn dispatch_as_signer() -> Weight;
@@ -37,6 +38,9 @@ impl WeightInfo for () {
 		Weight::default()
 	}
 	fn attest() -> Weight {
+		Weight::default()
+	}
+	fn register_lite_consumer() -> Weight {
 		Weight::default()
 	}
 	fn cancel_attestation() -> Weight {

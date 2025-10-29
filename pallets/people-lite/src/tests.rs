@@ -37,7 +37,9 @@ fn member_from_secret(sec: &SecretOfTest) -> MemberOf<Test> {
 	<Test as crate::Config>::Crypto::member_from_secret(sec)
 }
 
-fn sign_attest_with_secret(sec: &SecretOfTest, who: u64) -> crate::SignatureOf<Test> {
+// TODO: do tests for consumer_registration
+
+fn sign_attest_with_secret(sec: &SecretOfTest, who: u64) -> crate::types::SignatureOf<Test> {
 	let key = member_from_secret(sec);
 	<Test as crate::Config>::Crypto::sign(sec, &attest_msg(who, key)[..]).expect("sign ok")
 }
@@ -131,6 +133,7 @@ fn set_attestation_fails_for_wrong_origin() {
 			candidate_signature,
 			ring_vrf_key,
 			proof,
+			None,
 		)
 		.expect_err("root is not a valid origin for attest");
 
@@ -155,6 +158,7 @@ fn set_attestation_fails_for_no_attestation_allowance() {
 			candidate_signature,
 			ring_vrf_key,
 			proof_of_ownership: proof,
+			consumer_registration: None,
 		});
 		let err = exec_signed_tx(who, call).expect_err("must fail without allowance");
 
@@ -186,6 +190,7 @@ fn set_attestation_succeeds() {
 			candidate_signature,
 			ring_vrf_key,
 			proof_of_ownership: proof,
+			consumer_registration: None,
 		});
 		assert_ok!(exec_signed_tx(who, call));
 
@@ -219,7 +224,8 @@ fn register_fails_for_invalid_proof_of_ownership() {
 				who,
 				candidate_signature,
 				ring_ok,
-				bad_proof
+				bad_proof,
+				None,
 			),
 			crate::Error::<Test>::InvalidProofOfOwnership
 		);
@@ -249,7 +255,8 @@ fn register_fails_for_invalid_attestation_signature() {
 				who,
 				bad_attestation_signature,
 				ring_vrf_key,
-				proof
+				proof,
+				None,
 			),
 			crate::Error::<Test>::InvalidAttestationSignature
 		);
@@ -278,6 +285,7 @@ fn register_fails_for_already_registered() {
 			proof_of_ownership: proof,
 			candidate: who,
 			candidate_signature,
+			consumer_registration: None,
 		});
 		assert_ok!(exec_signed_tx(verifier, set_call));
 		assert!(LitePeople::<Test>::contains_key(who));
@@ -294,7 +302,8 @@ fn register_fails_for_already_registered() {
 				who,
 				candidate_signature,
 				ring_vrf_key,
-				proof
+				proof,
+				None,
 			),
 			crate::Error::<Test>::AlreadyRegistered
 		);
@@ -328,7 +337,7 @@ fn dispatch_as_signer_succeeds() {
 		// Make the account a lite person (minimal state required by the tx extension).
 		LitePeople::<Test>::insert(
 			who,
-			crate::pallet::LitePersonInfo {
+			crate::types::LitePersonInfo {
 				ring_vrf_key: [1u8; 32],
 				method: RecognitionMethod::UniqueDevice(0),
 			},
@@ -388,6 +397,7 @@ fn full_flow_manager_attester_user_register_and_dispatch() {
 			proof_of_ownership: proof,
 			candidate: user,
 			candidate_signature,
+			consumer_registration: None,
 		});
 		assert_ok!(exec_signed_tx(attester, set_call));
 

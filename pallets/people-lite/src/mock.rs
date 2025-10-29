@@ -73,6 +73,7 @@ impl crate::Config for Test {
 	type AttestationAllowanceManager = EnsureRoot<Self::AccountId>;
 	type Crypto = Simple;
 	type AttestationSignature = UintAuthorityId;
+	type LiteConsumerRegistrar = ();
 	#[cfg(feature = "runtime-benchmarks")]
 	type BenchmarkHelper = Helper;
 }

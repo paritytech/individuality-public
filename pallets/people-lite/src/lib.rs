@@ -28,6 +28,7 @@ use alloc::boxed::Box;
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
 pub mod extension;
+pub mod types;
 pub mod weights;
 
 #[cfg(test)]
@@ -43,7 +44,11 @@ use frame_support::{
 	dispatch::{DispatchResultWithPostInfo, PostDispatchInfo},
 	traits::IsSubType,
 };
+use indiv_support::traits::{CommunicationIdentifier, ConsumerRegistrar, Username};
 use sp_runtime::traits::{Dispatchable, IdentifyAccount, Verify};
+use types::{
+	LiteConsumerRegistrationParamsOf, LitePersonInfo, LitePersonInfoOf, MemberOf, RecognitionMethod,
+};
 use verifiable::GenerateVerifiable;
 
 #[frame_support::pallet]
@@ -55,32 +60,6 @@ pub mod pallet {
 	pub const MSG_PREFIX: &[u8; 30] = b"pop:people-lite:register using";
 
 	// const LOG_TARGET: &str = "runtime::pallet-people-lite";
-
-	pub type MemberOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Member;
-	pub type SignatureOf<T> = <<T as Config>::Crypto as GenerateVerifiable>::Signature;
-
-	/// The method through which the user was recognized as a lite person.
-	#[derive(
-		Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen,
-	)]
-	pub enum RecognitionMethod<Account> {
-		/// User has a unique device, corroborated by the attester.
-		UniqueDevice(Account),
-		// Voucher(PersonalId)
-	}
-
-	/// Information about a registered lite person.
-	#[derive(
-		Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen,
-	)]
-	pub struct LitePersonInfo<Member, Method> {
-		/// The user's ring vrf key.
-		pub ring_vrf_key: Member,
-		/// The method through which the user was registered.
-		pub method: Method,
-	}
-	pub type LitePersonInfoOf<T> =
-		LitePersonInfo<MemberOf<T>, RecognitionMethod<<T as frame_system::Config>::AccountId>>;
 
 	#[pallet::pallet]
 	pub struct Pallet<T>(_);
@@ -110,6 +89,10 @@ pub mod pallet {
 		/// behalf.
 		type AttestationSignature: Verify<Signer: IdentifyAccount<AccountId = Self::AccountId>>
 			+ Parameter;
+
+		/// Lite personhood consumer service. Lite people can be automatically registered when
+		/// attested.
+		type LiteConsumerRegistrar: ConsumerRegistrar<Self::AccountId, Error: Into<DispatchError>>;
 
 		/// A set of helper functions for benchmarking.
 		///
@@ -229,14 +212,24 @@ pub mod pallet {
 		/// - `ring_vrf_key_signature`: The ring VRF signature, provided by the candidate, to allow
 		///   the attester to complete the registration process. This also prove the ownership of
 		///   the ring VRF key by the candidate.
+		/// - consumer_registration: Optional parameter which can contain the necessary information
+		///   to forward a consumer registration request to the `LiteConsumerRegistrar` service. If
+		///   present, it also contains a signature created by the user in order to validate the
+		///   intent. More information on the signing payload generation available in
+		///   [types::LiteConsumerRegistrationParams::signing_payload].
 		#[pallet::call_index(2)]
-		#[pallet::weight(<T as Config>::WeightInfo::attest())]
+		#[pallet::weight({ if consumer_registration.is_some() {
+			<T as Config>::WeightInfo::attest().saturating_add(<T as Config>::WeightInfo::register_lite_consumer())
+		} else {
+			<T as Config>::WeightInfo::attest()
+		}})]
 		pub fn attest(
 			origin: OriginFor<T>,
 			candidate: T::AccountId,
 			candidate_signature: T::AttestationSignature,
 			ring_vrf_key: MemberOf<T>,
 			proof_of_ownership: <T::Crypto as GenerateVerifiable>::Signature,
+			consumer_registration: Option<LiteConsumerRegistrationParamsOf<T>>,
 		) -> DispatchResultWithPostInfo {
 			let verifier = ensure_signed(origin)?;
 			ensure!(!LitePeople::<T>::contains_key(&candidate), Error::<T>::AlreadyRegistered);
@@ -267,9 +260,18 @@ pub mod pallet {
 
 			LitePeople::<T>::insert(
 				&candidate,
-				LitePersonInfo { ring_vrf_key, method: RecognitionMethod::UniqueDevice(verifier) },
+				LitePersonInfo {
+					ring_vrf_key,
+					method: RecognitionMethod::UniqueDevice(verifier.clone()),
+				},
 			);
 			frame_system::Pallet::<T>::inc_sufficients(&candidate);
+
+			// If provided with additional params and signature to register as lite consumer,
+			// forward the registration to the `ConsumerRegistrar` service.
+			if let Some(params) = consumer_registration {
+				Self::register_lite_consumer(params, &verifier)?;
+			}
 
 			Ok(Pays::No.into())
 		}
@@ -291,6 +293,40 @@ pub mod pallet {
 			origin.set_caller_from(frame_system::RawOrigin::Signed(who));
 
 			call.dispatch(origin)
+		}
+	}
+
+	impl<T: Config> Pallet<T> {
+		/// Register a lite person as a consumer by calling into the `LiteConsumerRegistrar`
+		/// service.
+		///
+		/// This action requires user consent, provided through a signature verified in this
+		/// function. The signing payload is constructed by encoding, in order, the tuple of:
+		/// - the user's account
+		/// - the verifier's account
+		/// - the user's identifier_key
+		/// - the user's chosen username, without the `.` separator and any following digits
+		/// - the user's chosen reserved_username, as an `Option`
+		///
+		/// For more information about the signing payload, check
+		/// [types::LiteConsumerRegistrationParams::signing_payload].
+		pub fn register_lite_consumer(
+			params: LiteConsumerRegistrationParamsOf<T>,
+			verifier: &T::AccountId,
+		) -> DispatchResult {
+			// Verify the candidate's signature for the consumer registration.
+			ensure!(
+				params.signature.verify(&params.signing_payload(verifier)[..], &params.account),
+				Error::<T>::InvalidAttestationSignature,
+			);
+			T::LiteConsumerRegistrar::register_lite_consumer(
+				params.account,
+				params.identifier_key,
+				params.username,
+				params.reserved_username,
+			)
+			.map_err(|e| e.into())?;
+			Ok(())
 		}
 	}
 

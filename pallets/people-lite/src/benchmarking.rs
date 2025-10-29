@@ -19,7 +19,10 @@ use super::*;
 use alloc::vec::Vec;
 use codec::{Decode, Encode};
 use frame_benchmarking::v2::{benchmarks, *};
-use frame_support::dispatch::{DispatchInfo, RawOrigin};
+use frame_support::{
+	assert_ok,
+	dispatch::{DispatchInfo, RawOrigin},
+};
 use frame_system::RawOrigin as SystemOrigin;
 use sp_runtime::traits::{
 	AsSystemOriginSigner, AsTransactionAuthorizedOrigin, DispatchTransaction, TrailingZeroInput,
@@ -98,6 +101,37 @@ mod benches {
 	}
 
 	#[benchmark]
+	fn register_lite_consumer() -> Result<(), BenchmarkError> {
+		let attester: T::AccountId = whitelisted_caller();
+
+		let (account, _) = T::BenchmarkHelper::sign_message(b"mock");
+		let identifier_key: CommunicationIdentifier = [0u8; 65];
+		let username = Username::try_from(b"validusername.12".to_vec()).unwrap();
+		let reserved_username = Some(Username::try_from(b"reservedusername".to_vec()).unwrap());
+
+		let separator_idx = username.iter().position(|b| *b == b'.').unwrap();
+		let msg =
+			(&account, &attester, &identifier_key, &username[..separator_idx], &reserved_username)
+				.encode();
+		let (_, signature) = T::BenchmarkHelper::sign_message(&msg[..]);
+
+		let params = crate::types::LiteConsumerRegistrationParams {
+			signature,
+			account,
+			identifier_key,
+			username,
+			reserved_username,
+		};
+
+		#[block]
+		{
+			assert_ok!(Pallet::<T>::register_lite_consumer(params, &attester));
+		}
+
+		Ok(())
+	}
+
+	#[benchmark]
 	fn attest() -> Result<(), BenchmarkError> {
 		let attester: T::AccountId = whitelisted_caller();
 
@@ -116,7 +150,7 @@ mod benches {
 		crate::AttestationAllowance::<T>::insert(&attester, 1);
 
 		#[extrinsic_call]
-		_(RawOrigin::Signed(attester.clone()), att.clone(), att_sig, pk, proof_of_ownership);
+		_(RawOrigin::Signed(attester.clone()), att.clone(), att_sig, pk, proof_of_ownership, None);
 
 		assert_eq!(crate::AttestationAllowance::<T>::get(&attester), 0);
 		assert!(!crate::AttestationAllowance::<T>::contains_key(&attester));

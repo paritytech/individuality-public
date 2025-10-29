@@ -15,7 +15,6 @@
 
 mod reality;
 pub use reality::{
-	AddOnlyPeopleTrait, Alias, CommunicationIdentifier, Context, ContextualAlias,
-	CountedMembers, PeopleTrait,
-	PersonalId, RingIndex, RI_ZERO,
+	AddOnlyPeopleTrait, Alias, CommunicationIdentifier, ConsumerRegistrar, Context,
+	ContextualAlias, CountedMembers, PeopleTrait, PersonalId, RingIndex, Username, RI_ZERO,
 };

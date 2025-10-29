@@ -37,7 +37,7 @@ use frame_support::{
 	dispatch::DispatchResultWithPostInfo,
 	traits::{EnsureOriginWithArg, UnixTime},
 };
-use indiv_support::traits::{Alias, CommunicationIdentifier, Context};
+use indiv_support::traits::{Alias, CommunicationIdentifier, ConsumerRegistrar, Context, Username};
 use sp_runtime::traits::{IdentifyAccount, Verify};
 use sp_statement_store::{
 	runtime_api::{InvalidStatement, StatementSource, ValidStatement},
@@ -46,8 +46,8 @@ use sp_statement_store::{
 	Statement,
 };
 use types::{
-	ConsumerInfo, ConsumerInfoOf, Credibility, InvalidStatementReason, PersonalUsernameChoice,
-	PersonalUsernameChoiceOf, Username, UsernameReservation, UsernameReservationOf,
+	ConsumerInfo, Credibility, InvalidStatementReason, PersonalUsernameChoice, UsernameReservation,
+	UsernameReservationOf,
 };
 use verifiable::GenerateVerifiable;
 
@@ -121,12 +121,15 @@ pub mod pallet {
 
 		/// The limit for the statement store usage for lite people.
 		type LitePersonStatementLimit: Get<ValidStatement>;
+
+		/// Benchmark helper trait.
+		#[cfg(feature = "runtime-benchmarks")]
+		type BenchmarkHelper: benchmarking::BenchmarkHelper<Self>;
 	}
 
 	/// Accounts used to identify consumers mapped to their consumer information.
 	#[pallet::storage]
-	pub type Consumers<T: Config> =
-		StorageMap<_, Blake2_128Concat, T::AccountId, ConsumerInfoOf<T>>;
+	pub type Consumers<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, ConsumerInfo>;
 
 	/// Reverse lookup from `username` to the `AccountId` that has registered it. The `owner` value
 	/// should be a key in the `Consumers` map. There can be at most 2 usernames pointing to the
@@ -136,13 +139,13 @@ pub mod pallet {
 	///   applicable.
 	#[pallet::storage]
 	pub type UsernameOwnerOf<T: Config> =
-		StorageMap<_, Blake2_128Concat, Username<T>, T::AccountId, OptionQuery>;
+		StorageMap<_, Blake2_128Concat, Username, T::AccountId, OptionQuery>;
 
 	/// Reverse lookup from a reserved `username` to the `AccountId` that has registered it along
 	/// with the timestamp when it happened. Old reservations can be removed from storage.
 	#[pallet::storage]
 	pub type ReservedUsernames<T: Config> =
-		StorageMap<_, Blake2_128Concat, Username<T>, UsernameReservationOf<T>, OptionQuery>;
+		StorageMap<_, Blake2_128Concat, Username, UsernameReservationOf<T>, OptionQuery>;
 
 	/// Reverse lookup from registered aliases to the `AccountId` used to register as a consumer.
 	#[pallet::storage]
@@ -199,52 +202,17 @@ pub mod pallet {
 		pub fn register_lite_person(
 			origin: OriginFor<T>,
 			identifier_key: CommunicationIdentifier,
-			username: Username<T>,
-			reserved_username: Option<Username<T>>,
+			username: Username,
+			reserved_username: Option<Username>,
 		) -> DispatchResultWithPostInfo {
 			// Ensure this is a lite person.
 			let lite_person_account = T::EnsureLitePerson::ensure_origin(origin)?;
-			// Must not already be registered.
-			ensure!(
-				!Consumers::<T>::contains_key(&lite_person_account),
-				Error::<T>::AlreadyRegistered
-			);
-			// Validate the username, including that it is not already taken.
-			ensure!(!UsernameOwnerOf::<T>::contains_key(&username), Error::<T>::UsernameTaken);
-			ensure!(!ReservedUsernames::<T>::contains_key(&username), Error::<T>::UsernameTaken);
-			Self::validate_username(&username, false)?;
-			if let Some(reserved_username) = reserved_username {
-				ensure!(reserved_username != username, Error::<T>::InvalidUsername);
-				ensure!(
-					!UsernameOwnerOf::<T>::contains_key(&reserved_username),
-					Error::<T>::UsernameReservationTaken
-				);
-				ensure!(
-					!ReservedUsernames::<T>::contains_key(&reserved_username),
-					Error::<T>::UsernameReservationTaken
-				);
-				Self::validate_username(&reserved_username, true)?;
-				let reservation = UsernameReservation {
-					owner: lite_person_account.clone(),
-					since: T::Clock::now().as_secs(),
-				};
-				ReservedUsernames::<T>::insert(reserved_username, reservation);
-			}
-			// Add the username to the list.
-			UsernameOwnerOf::<T>::insert(&username, &lite_person_account);
-			// Set the consumer's record.
-			Consumers::<T>::insert(
-				&lite_person_account,
-				ConsumerInfo {
-					identifier_key,
-					full_username: None,
-					lite_username: username,
-					credibility: Credibility::Lite,
-				},
-			);
-			frame_system::Pallet::<T>::inc_sufficients(&lite_person_account);
-
-			Self::deposit_event(Event::LitePersonRegistered { account: lite_person_account });
+			Self::register_lite_consumer_inner(
+				lite_person_account,
+				identifier_key,
+				username,
+				reserved_username,
+			)?;
 			Ok(Pays::No.into())
 		}
 
@@ -263,7 +231,7 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			linked_lite_identity: T::AccountId,
 			lite_identity_proof: T::OffchainSignature,
-			username_choice: PersonalUsernameChoiceOf<T>,
+			username_choice: PersonalUsernameChoice,
 		) -> DispatchResultWithPostInfo {
 			// Ensure this is a person.
 			let alias = T::EnsurePerson::ensure_origin(origin, &RESOURCES_CONTEXT)?;
@@ -339,7 +307,7 @@ pub mod pallet {
 			let account = AccountOfAlias::<T>::get(alias).ok_or(Error::<T>::NotRegistered)?;
 			let consumer_info = Consumers::<T>::get(&account).ok_or(Error::<T>::NotRegistered)?;
 			let Credibility::Person { last_update, .. } = consumer_info.credibility else {
-				return Err(Error::<T>::NotFullPerson.into())
+				return Err(Error::<T>::NotFullPerson.into());
 			};
 			// Ensure the authorization is old enough to be touched.
 			let now = T::Clock::now().as_secs();
@@ -366,7 +334,7 @@ pub mod pallet {
 		#[pallet::weight(<T as Config>::WeightInfo::remove_expired_username_reservation())]
 		pub fn remove_expired_username_reservation(
 			origin: OriginFor<T>,
-			username: Username<T>,
+			username: Username,
 		) -> DispatchResultWithPostInfo {
 			let _ = T::EnsureLitePerson::ensure_origin(origin)?;
 			let reservation =
@@ -400,7 +368,7 @@ pub mod pallet {
 
 	impl<T: Config> Pallet<T> {
 		/// Ensure a username is valid depending on the owner's credibility.
-		pub fn validate_username(username: &Username<T>, person: bool) -> Result<(), Error<T>> {
+		pub fn validate_username(username: &Username, person: bool) -> Result<(), Error<T>> {
 			// Ensure the username is available.
 			if person {
 				// People can choose any username of minimum length `MinUsernameLength`, as long as
@@ -509,6 +477,73 @@ pub mod pallet {
 				Consumers::<T>::get(account).ok_or(InvalidStatementReason::NotConsumer)?;
 			let limit = T::LitePersonStatementLimit::get();
 			Ok(limit)
+		}
+
+		/// Register a lite consumer using the provided information.
+		///
+		/// IMPORTANT
+		///
+		/// This function does not check for authorization. The caller is responsible for ensuring
+		/// the `account` to be registered is a lite person and that the user's consent was
+		/// provided, usually through a signature verified by the caller.
+		pub fn register_lite_consumer_inner(
+			account: T::AccountId,
+			identifier_key: CommunicationIdentifier,
+			username: Username,
+			reserved_username: Option<Username>,
+		) -> Result<(), Error<T>> {
+			// Must not already be registered.
+			ensure!(!Consumers::<T>::contains_key(&account), Error::<T>::AlreadyRegistered);
+			// Validate the username, including that it is not already taken.
+			ensure!(!UsernameOwnerOf::<T>::contains_key(&username), Error::<T>::UsernameTaken);
+			ensure!(!ReservedUsernames::<T>::contains_key(&username), Error::<T>::UsernameTaken);
+			Self::validate_username(&username, false)?;
+			if let Some(reserved_username) = reserved_username {
+				ensure!(reserved_username != username, Error::<T>::InvalidUsername);
+				ensure!(
+					!UsernameOwnerOf::<T>::contains_key(&reserved_username),
+					Error::<T>::UsernameReservationTaken
+				);
+				ensure!(
+					!ReservedUsernames::<T>::contains_key(&reserved_username),
+					Error::<T>::UsernameReservationTaken
+				);
+				Self::validate_username(&reserved_username, true)?;
+				let reservation = UsernameReservation {
+					owner: account.clone(),
+					since: T::Clock::now().as_secs(),
+				};
+				ReservedUsernames::<T>::insert(reserved_username, reservation);
+			}
+			// Add the username to the list.
+			UsernameOwnerOf::<T>::insert(&username, &account);
+			// Set the consumer's record.
+			Consumers::<T>::insert(
+				&account,
+				ConsumerInfo {
+					identifier_key,
+					full_username: None,
+					lite_username: username,
+					credibility: Credibility::Lite,
+				},
+			);
+			frame_system::Pallet::<T>::inc_sufficients(&account);
+
+			Self::deposit_event(Event::LitePersonRegistered { account });
+			Ok(())
+		}
+	}
+
+	impl<T: Config> ConsumerRegistrar<T::AccountId> for Pallet<T> {
+		type Error = Error<T>;
+
+		fn register_lite_consumer(
+			account: T::AccountId,
+			identifier_key: CommunicationIdentifier,
+			username: Username,
+			reserved_username: Option<Username>,
+		) -> Result<(), Error<T>> {
+			Self::register_lite_consumer_inner(account, identifier_key, username, reserved_username)
 		}
 	}
 }
