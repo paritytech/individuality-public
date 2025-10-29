@@ -1,5 +1,5 @@
 [package]
-name = "pallet-people-lite"
+name = "indiv-pallet-people-lite"
 description = "A pallet holding information for people without strong individuality verification"
 version.workspace = true
 authors.workspace = true

@@ -852,7 +852,7 @@ fn validate_statement_success_for_consumer() {
 		let consumer_account: AccountId32 = pair.public().into();
 		// Register the consumer
 		assert_ok!(Resources::register_lite_person(
-			RuntimeOrigin::from(OriginCaller::PeopleLite(pallet_people_lite::Origin::LitePerson(
+			RuntimeOrigin::from(OriginCaller::PeopleLite(indiv_pallet_people_lite::Origin::LitePerson(
 				consumer_account.clone()
 			))),
 			comm_id(b"key"),

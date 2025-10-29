@@ -1,5 +1,5 @@
 [package]
-name = "pallet-resources"
+name = "indiv-pallet-resources"
 description = "A pallet for common people resource management and allocation"
 version.workspace = true
 authors.workspace = true
@@ -32,7 +32,7 @@ indiv-support = { workspace = true }
 
 [dev-dependencies]
 pallet-balances = { workspace = true }
-pallet-people-lite = { workspace = true }
+indiv-pallet-people-lite = { workspace = true }
 indiv-pallet-people = { workspace = true }
 
 [features]
@@ -51,7 +51,7 @@ std = [
 	"sp-runtime/std",
 	"sp-statement-store/std",
 	"pallet-balances/std",
-	"pallet-people-lite/std",
+	"indiv-pallet-people-lite/std",
 	"indiv-pallet-people/std",
 	"verifiable/std",
 	"xcm/std"
@@ -63,7 +63,7 @@ runtime-benchmarks = [
 	"indiv-support/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 	"pallet-balances/runtime-benchmarks",
-	"pallet-people-lite/runtime-benchmarks",
+	"indiv-pallet-people-lite/runtime-benchmarks",
 	"indiv-pallet-people/runtime-benchmarks",
 	"xcm/runtime-benchmarks"
 ]
@@ -73,5 +73,5 @@ try-runtime = [
 	"sp-runtime/try-runtime",
 	"pallet-balances/try-runtime",
 	"indiv-pallet-people/try-runtime",
-	"pallet-people-lite/try-runtime"
+	"indiv-pallet-people-lite/try-runtime"
 ]

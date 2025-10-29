@@ -134,10 +134,10 @@ testnet-parachains-constants = { version = "15.0.0", default-features = false }
 bp-bridge-hub-rococo = { version = "0.24.0", default-features = false }
 indiv-support = { path = "support", default-features = false }
 indiv-pallet-dummy-dim = { path = "pallets/dummy-dim", default-features = false }
-pallet-people-lite = { path = "pallets/people-lite", default-features = false }
+indiv-pallet-people-lite = { path = "pallets/people-lite", default-features = false }
 indiv-pallet-people = { path = "pallets/people-multi", default-features = false }
 indiv-pallet-origin-restriction = { path = "pallets/origin-restriction", default-features = false }
-pallet-resources = { path = "pallets/resources", default-features = false }
+indiv-pallet-resources = { path = "pallets/resources", default-features = false }
 rand = { version = "0.9.2" }
 parking_lot = { version = "0.12.3" }
 

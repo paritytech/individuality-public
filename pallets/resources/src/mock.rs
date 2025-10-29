@@ -100,7 +100,7 @@ pub fn mock_lite_proof(lite_account: AccountId32) -> AccountAuthority {
 
 /// Helper to mock the LitePerson origin
 pub fn lite_person_origin(account: u64) -> RuntimeOrigin {
-	RuntimeOrigin::from(OriginCaller::PeopleLite(pallet_people_lite::Origin::LitePerson(
+	RuntimeOrigin::from(OriginCaller::PeopleLite(indiv_pallet_people_lite::Origin::LitePerson(
 		id_to_account(account),
 	)))
 }
@@ -169,7 +169,7 @@ frame_support::construct_runtime!(
 		System: frame_system,
 		Resources: crate,
 		People: indiv_pallet_people,
-		PeopleLite: pallet_people_lite,
+		PeopleLite: indiv_pallet_people_lite,
 	}
 );
 
@@ -253,7 +253,7 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for MockLitePerson {
 
 	fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
 		match origin.caller() {
-			OriginCaller::PeopleLite(pallet_people_lite::Origin::LitePerson(account)) =>
+			OriginCaller::PeopleLite(indiv_pallet_people_lite::Origin::LitePerson(account)) =>
 				Ok(account.clone()),
 			_ => Err(origin),
 		}
@@ -268,13 +268,13 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for MockLitePerson {
 #[cfg(feature = "runtime-benchmarks")]
 pub struct Helper;
 #[cfg(feature = "runtime-benchmarks")]
-impl pallet_people_lite::BenchmarkHelper<AccountId32, AccountAuthority> for Helper {
+impl indiv_pallet_people_lite::BenchmarkHelper<AccountId32, AccountAuthority> for Helper {
 	fn sign_message(_message: &[u8]) -> (AccountId32, AccountAuthority) {
 		([0u8; 32].into(), AccountAuthority([0u8; 32].into()))
 	}
 }
 
-impl pallet_people_lite::Config for Test {
+impl indiv_pallet_people_lite::Config for Test {
 	type WeightInfo = ();
 	type AttestationAllowanceManager = EnsureRoot<Self::AccountId>;
 	type Crypto = Simple;
@@ -326,7 +326,7 @@ impl Config for Test {
 	type PersonAuthDuration = ConstU32<20>;
 	type MinPersonAuthUpdateInterval = ConstU32<10>;
 	type EnsurePerson = indiv_pallet_people::EnsurePersonalAliasInContext<Test>;
-	type EnsureLitePerson = pallet_people_lite::EnsureLitePerson<Test>;
+	type EnsureLitePerson = indiv_pallet_people_lite::EnsureLitePerson<Test>;
 	type Clock = TestClock;
 	type OffchainSignature = AccountAuthority;
 	type UsernameReservationDuration = ConstU64<40>;
