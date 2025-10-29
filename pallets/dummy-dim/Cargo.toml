@@ -1,14 +1,13 @@
 [package]
-name = "pallet-dummy-dim"
-version = "1.0.0"
-authors = ["Parity Technologies <admin@parity.io>"]
-edition = "2021"
-license = "Apache-2.0"
-homepage = "https://substrate.io"
-repository = "https://github.com/paritytech/substrate/"
+name = "indiv-pallet-dummy-dim"
 description = "Dummy DIM Pallet"
-readme = "README.md"
-
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
 [lints]
 workspace = true
 
@@ -20,7 +19,7 @@ codec = { workspace = true, features = ["derive"] }
 frame-benchmarking = { workspace = true, optional = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
-individuality-support = { workspace = true }
+indiv-support = { workspace = true }
 log = { workspace = true }
 scale-info = { workspace = true, features = ["derive"] }
 sp-api = { workspace = true }
@@ -30,7 +29,7 @@ sp-io = { workspace = true }
 sp-runtime = { workspace = true }
 
 [dev-dependencies]
-pallet-people-multi = { workspace = true }
+indiv-pallet-people = { workspace = true }
 verifiable = { workspace = true, features = ["small-ring"] }
 
 [features]
@@ -40,9 +39,9 @@ std = [
 	"frame-benchmarking?/std",
 	"frame-support/std",
 	"frame-system/std",
-	"individuality-support/std",
+	"indiv-support/std",
 	"log/std",
-	"pallet-people-multi/std",
+	"indiv-pallet-people/std",
 	"scale-info/std",
 	"sp-api/std",
 	"sp-arithmetic/std",
@@ -55,13 +54,13 @@ runtime-benchmarks = [
 	"frame-benchmarking/runtime-benchmarks",
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
-	"individuality-support/runtime-benchmarks",
-	"pallet-people-multi/runtime-benchmarks",
+	"indiv-support/runtime-benchmarks",
+	"indiv-pallet-people/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 ]
 try-runtime = [
 	"frame-support/try-runtime",
 	"frame-system/try-runtime",
-	"pallet-people-multi/try-runtime",
+	"indiv-pallet-people/try-runtime",
 	"sp-runtime/try-runtime",
 ]

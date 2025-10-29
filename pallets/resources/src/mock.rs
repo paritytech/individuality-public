@@ -1,19 +1,17 @@
-// This file is part of Substrate.
-
 // Copyright (C) Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// This file is part of Individuality.
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Polkadot is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License.
+
+// Individuality is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Individuality.  If not, see <http://www.gnu.org/licenses/>.
 
 #![allow(unused)]
 
@@ -30,8 +28,8 @@ use frame_system::{
 	offchain::{CreateBare, CreateTransactionBase},
 	EnsureRoot,
 };
-use individuality_support::traits::{ContextualAlias, RingIndex};
-use pallet_people_multi::RevisedContextualAlias;
+use indiv_support::traits::{ContextualAlias, RingIndex};
+use indiv_pallet_people::RevisedContextualAlias;
 use scale_info::TypeInfo;
 use sp_runtime::{
 	testing::H256,
@@ -111,7 +109,7 @@ pub fn person_origin_for(alias_id: u64, ring: RingIndex, revision: u32) -> Runti
 	let alias = id_to_alias(alias_id);
 	let contextual_alias = ContextualAlias { context: RESOURCES_CONTEXT, alias };
 	let revised_alias = RevisedContextualAlias { ca: contextual_alias, ring, revision };
-	RuntimeOrigin::from(OriginCaller::People(pallet_people_multi::Origin::PersonalAlias(
+	RuntimeOrigin::from(OriginCaller::People(indiv_pallet_people::Origin::PersonalAlias(
 		revised_alias,
 	)))
 }
@@ -169,7 +167,7 @@ frame_support::construct_runtime!(
 	{
 		System: frame_system,
 		Resources: crate,
-		People: pallet_people_multi,
+		People: indiv_pallet_people,
 		PeopleLite: pallet_people_lite,
 	}
 );
@@ -220,7 +218,7 @@ impl frame_support::traits::EnsureOriginWithArg<RuntimeOrigin, Context> for Mock
 		_context: &Context,
 	) -> Result<Self::Success, RuntimeOrigin> {
 		match origin.caller() {
-			OriginCaller::People(pallet_people_multi::Origin::PersonalAlias(contextual_alias)) =>
+			OriginCaller::People(indiv_pallet_people::Origin::PersonalAlias(contextual_alias)) =>
 				Ok(contextual_alias.ca.alias),
 			_ => Err(origin),
 		}
@@ -232,7 +230,7 @@ impl frame_support::traits::EnsureOriginWithArg<RuntimeOrigin, Context> for Mock
 	}
 }
 
-impl individuality_support::traits::CountedMembers for MockPerson {
+impl indiv_support::traits::CountedMembers for MockPerson {
 	fn active_count() -> u32 {
 		0
 	}
@@ -277,7 +275,7 @@ impl pallet_people_lite::Config for Test {
 	type BenchmarkHelper = Helper;
 }
 
-impl pallet_people_multi::Config for Test {
+impl indiv_pallet_people::Config for Test {
 	type WeightInfo = ();
 	type Crypto = Simple;
 	type AccountContexts = ();
@@ -302,7 +300,7 @@ impl Config for Test {
 	type MinUsernameLength = ConstU32<7>;
 	type PersonAuthDuration = ConstU32<20>;
 	type MinPersonAuthUpdateInterval = ConstU32<10>;
-	type EnsurePerson = pallet_people_multi::EnsurePersonalAliasInContext<Test>;
+	type EnsurePerson = indiv_pallet_people::EnsurePersonalAliasInContext<Test>;
 	type EnsureLitePerson = pallet_people_lite::EnsureLitePerson<Test>;
 	type Clock = TestClock;
 	type OffchainSignature = AccountAuthority;

@@ -1,19 +1,17 @@
-// This file is part of Substrate.
-
 // Copyright (C) Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// This file is part of Individuality.
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Polkadot is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License.
+
+// Individuality is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Individuality.  If not, see <http://www.gnu.org/licenses/>.
 
 use frame_support::derive_impl;
 use frame_system::{
@@ -34,7 +32,7 @@ frame_support::construct_runtime!(
 	pub enum Test
 	{
 		System: frame_system,
-		People: pallet_people_multi,
+		People: indiv_pallet_people,
 		DummyDim: crate
 	}
 );
@@ -66,7 +64,7 @@ impl frame_system::Config for Test {
 	type MaxConsumers = frame_support::traits::ConstU32<16>;
 }
 
-impl pallet_people_multi::Config for Test {
+impl indiv_pallet_people::Config for Test {
 	type WeightInfo = ();
 	type Crypto = verifiable::demo_impls::Simple;
 	type AccountContexts = ();
@@ -91,13 +89,13 @@ pub fn advance_to(b: u64) {
 	}
 }
 
-impl CreateBare<pallet_people_multi::Call<Self>> for Test {
+impl CreateBare<indiv_pallet_people::Call<Self>> for Test {
 	fn create_bare(call: Self::RuntimeCall) -> Self::Extrinsic {
 		Self::Extrinsic::new_bare(call)
 	}
 }
 
-impl CreateTransactionBase<pallet_people_multi::Call<Self>> for Test {
+impl CreateTransactionBase<indiv_pallet_people::Call<Self>> for Test {
 	type Extrinsic = ExtrinsicFor<Test>;
 	type RuntimeCall = RuntimeCall;
 }

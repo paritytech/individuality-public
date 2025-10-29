@@ -1,11 +1,13 @@
 [package]
 name = "pallet-resources"
-version = "4.0.0-dev"
+description = "A pallet for common people resource management and allocation"
+version.workspace = true
 authors.workspace = true
 edition.workspace = true
+license.workspace = true
+homepage.workspace = true
 repository.workspace = true
-description = "A pallet for common people resource management and allocation"
-
+readme.workspace = true
 [lints]
 workspace = true
 
@@ -26,12 +28,12 @@ sp-runtime = { workspace = true }
 sp-statement-store = { workspace = true }
 verifiable = { workspace = true }
 xcm = { workspace = true }
-individuality-support = { workspace = true }
+indiv-support = { workspace = true }
 
 [dev-dependencies]
 pallet-balances = { workspace = true }
 pallet-people-lite = { workspace = true }
-pallet-people-multi = { workspace = true }
+indiv-pallet-people = { workspace = true }
 
 [features]
 default = [ "std" ]
@@ -40,7 +42,7 @@ std = [
 	"frame-benchmarking?/std",
 	"frame-support/std",
 	"frame-system/std",
-	"individuality-support/std",
+	"indiv-support/std",
 	"log/std",
 	"scale-info/std",
 	"sp-arithmetic/std",
@@ -50,7 +52,7 @@ std = [
 	"sp-statement-store/std",
 	"pallet-balances/std",
 	"pallet-people-lite/std",
-	"pallet-people-multi/std",
+	"indiv-pallet-people/std",
 	"verifiable/std",
 	"xcm/std"
 ]
@@ -58,11 +60,11 @@ runtime-benchmarks = [
 	"frame-benchmarking/runtime-benchmarks",
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
-	"individuality-support/runtime-benchmarks",
+	"indiv-support/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 	"pallet-balances/runtime-benchmarks",
 	"pallet-people-lite/runtime-benchmarks",
-	"pallet-people-multi/runtime-benchmarks",
+	"indiv-pallet-people/runtime-benchmarks",
 	"xcm/runtime-benchmarks"
 ]
 try-runtime = [
@@ -70,6 +72,6 @@ try-runtime = [
 	"frame-system/try-runtime",
 	"sp-runtime/try-runtime",
 	"pallet-balances/try-runtime",
-	"pallet-people-multi/try-runtime",
+	"indiv-pallet-people/try-runtime",
 	"pallet-people-lite/try-runtime"
 ]

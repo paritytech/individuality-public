@@ -1,14 +1,13 @@
 [package]
-name = "pallet-people-multi"
-version = "1.0.0"
+name = "indiv-pallet-people"
+description = "Personhood-tracking pallet"
+version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Personhood-tracking pallet"
-readme = "README.md"
-
+readme.workspace = true
 [lints]
 workspace = true
 
@@ -27,7 +26,7 @@ sp-core = { workspace = true }
 sp-io = { workspace = true }
 sp-runtime = { workspace = true }
 verifiable = { workspace = true }
-individuality-support = { workspace = true }
+indiv-support = { workspace = true }
 
 [features]
 default = ["std"]
@@ -36,7 +35,7 @@ std = [
 	"frame-benchmarking?/std",
 	"frame-support/std",
 	"frame-system/std",
-	"individuality-support/std",
+	"indiv-support/std",
 	"log/std",
 	"scale-info/std",
 	"sp-arithmetic/std",
@@ -49,7 +48,7 @@ runtime-benchmarks = [
 	"frame-benchmarking/runtime-benchmarks",
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
-	"individuality-support/runtime-benchmarks",
+	"indiv-support/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 	"verifiable/no-std-prover",
 ]

@@ -1,25 +1,23 @@
-// This file is part of Substrate.
-
 // Copyright (C) Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// This file is part of Individuality.
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Polkadot is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License.
+
+// Individuality is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Individuality.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::collections::BTreeSet;
 
 use crate::{mock::*, ReservedIds};
 use frame_support::assert_ok;
-use individuality_support::traits::{AddOnlyPeopleTrait, PersonalId};
+use indiv_support::traits::{AddOnlyPeopleTrait, PersonalId};
 use verifiable::{demo_impls::Simple, GenerateVerifiable};
 
 #[test]
@@ -28,7 +26,7 @@ fn id_registration_works() {
 		assert_ok!(DummyDim::reserve_ids(RuntimeOrigin::root(), 100));
 		let dummy_ids: BTreeSet<_> = ReservedIds::<Test>::iter_keys().collect();
 		let people_ids: BTreeSet<_> =
-			pallet_people_multi::ReservedPersonalId::<Test>::iter_keys().collect();
+			indiv_pallet_people::ReservedPersonalId::<Test>::iter_keys().collect();
 		assert_eq!(dummy_ids, people_ids);
 		let mut independent_ids = vec![];
 		for _ in 0..100 {
@@ -73,7 +71,7 @@ fn personhood_recognition_and_suspension_works() {
 		));
 		for (id, key) in ids_and_keys {
 			assert_eq!(key, crate::People::<Test>::get(id).unwrap().key);
-			assert!(pallet_people_multi::Keys::<Test>::contains_key(key));
+			assert!(indiv_pallet_people::Keys::<Test>::contains_key(key));
 		}
 
 		let new_ids_and_keys: Vec<_> = (100..150)
@@ -85,7 +83,7 @@ fn personhood_recognition_and_suspension_works() {
 		));
 		for (id, key) in new_ids_and_keys {
 			assert_eq!(key, crate::People::<Test>::get(id).unwrap().key);
-			assert!(pallet_people_multi::Keys::<Test>::contains_key(key));
+			assert!(indiv_pallet_people::Keys::<Test>::contains_key(key));
 		}
 
 		assert_ok!(DummyDim::start_mutation_session(RuntimeOrigin::root()));
@@ -97,15 +95,15 @@ fn personhood_recognition_and_suspension_works() {
 		));
 		for id in (0..50).chain(125..150) {
 			assert!(!crate::People::<Test>::get(id).unwrap().suspended);
-			assert!(!pallet_people_multi::People::<Test>::get(id).unwrap().position.suspended());
+			assert!(!indiv_pallet_people::People::<Test>::get(id).unwrap().position.suspended());
 		}
 		for id in 50..125 {
 			assert!(crate::People::<Test>::get(id).unwrap().suspended);
-			assert!(pallet_people_multi::People::<Test>::get(id).unwrap().position.suspended());
+			assert!(indiv_pallet_people::People::<Test>::get(id).unwrap().position.suspended());
 		}
 
 		assert_ok!(DummyDim::end_mutation_session(RuntimeOrigin::root()));
-		pallet_people_multi::RingsState::<Test>::mutate(|s| {
+		indiv_pallet_people::RingsState::<Test>::mutate(|s| {
 			*s = s.clone().end_key_migration().unwrap()
 		});
 		assert_ok!(DummyDim::start_mutation_session(RuntimeOrigin::root()));
@@ -116,11 +114,11 @@ fn personhood_recognition_and_suspension_works() {
 
 		for id in (0..100).chain(125..150) {
 			assert!(!crate::People::<Test>::get(id).unwrap().suspended);
-			assert!(!pallet_people_multi::People::<Test>::get(id).unwrap().position.suspended());
+			assert!(!indiv_pallet_people::People::<Test>::get(id).unwrap().position.suspended());
 		}
 		for id in 100..125 {
 			assert!(crate::People::<Test>::get(id).unwrap().suspended);
-			assert!(pallet_people_multi::People::<Test>::get(id).unwrap().position.suspended());
+			assert!(indiv_pallet_people::People::<Test>::get(id).unwrap().position.suspended());
 		}
 
 		assert_ok!(DummyDim::end_mutation_session(RuntimeOrigin::root()));
