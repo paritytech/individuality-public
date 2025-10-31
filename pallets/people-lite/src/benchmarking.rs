@@ -87,7 +87,7 @@ mod benches {
 	}
 
 	#[benchmark]
-	fn clear_attestation_allowance(n: Linear<1, 1000>) -> Result<(), BenchmarkError> {
+	fn clear_attestation_allowance() -> Result<(), BenchmarkError> {
 		let verifier: T::AccountId = whitelisted_caller();
 
 		// Seed some allowance and `n` unclaimed attestations so we measure the linear clear.
